@@ -1,0 +1,27 @@
+{
+  "inputs": [
+    {
+      "id": "openrouter-api-key",
+      "type": "promptString",
+      "description": "OpenRouter API key for MCP Video Recognition",
+      "password": true
+    }
+  ],
+  "servers": {
+    "video-recognition": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "C:/path/to/mcp_video_recognition/dist/index.js"
+      ],
+      "env": {
+        "RECOGNITION_PROVIDER": "openai-compatible",
+        "OPENAI_COMPATIBLE_API_KEY": "${input:openrouter-api-key}",
+        "OPENAI_COMPATIBLE_BASE_URL": "https://openrouter.ai/api/v1",
+        "OPENAI_COMPATIBLE_MODEL": "xiaomi/mimo-v2.5",
+        "OPENAI_COMPATIBLE_PROVIDER_LABEL": "OpenRouter",
+        "LOG_LEVEL": "fatal"
+      }
+    }
+  }
+}

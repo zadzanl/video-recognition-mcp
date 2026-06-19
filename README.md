@@ -46,31 +46,38 @@ An MCP (Model Context Protocol) server that provides tools for image, audio, and
 
 ### Installing via Configuration Files
 
-To integrate this MCP server with Cline or other MCP clients via configuration files:
+#### VSCode-style  MCP Configuration Example
 
-1. Open your Cline settings:
-   - In VS Code, go to File -> Preferences -> Settings
-   - Search for "Cline MCP Settings"
-   - Click "Edit in settings.json"
+```json
+{
+  "inputs": [
+    {
+      "id": "openrouter-api-key",
+      "type": "promptString",
+      "description": "OpenRouter API key",
+      "password": true
+    }
+  ],
+  "servers": {
+    "video-recognition": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "C:/Projects/robot-thingy/video-recognition-mcp/dist/index.js"
+      ],
+      "env": {
+        "RECOGNITION_PROVIDER": "openai-compatible",
+        "OPENAI_COMPATIBLE_API_KEY": "${input:openrouter-api-key}",
+        "OPENAI_COMPATIBLE_BASE_URL": "https://openrouter.ai/api/v1",
+        "OPENAI_COMPATIBLE_MODEL": "xiaomi/mimo-v2.5",
+        "OPENAI_COMPATIBLE_PROVIDER_LABEL": "OpenRouter"
+      }
+    }
+  }
+}
+```
 
-2. Add the server configuration to the `mcpServers` object:
-   ```json
-   {
-     "mcpServers": {
-       "video-recognition": {
-         "command": "node",
-         "args": [
-           "/path/to/mcp_video_recognition/dist/index.js"
-         ],
-         "disabled": false,
-         "autoApprove": []
-       }
-     }
-   }
-   ```
-
-3. Replace `/path/to/mcp_video_recognition/dist/index.js` with the actual path to the `index.js` file in your project directory. Use forward slashes (`/`) or double backslashes (`\\`) for the path on Windows.
-4. Save the settings file. Cline should automatically connect to the server.
+Build the project before starting the MCP server so `dist/index.js` exists. If you change provider code or rebuild the server, restart the MCP server/client session so VS Code reloads the updated `dist/` files.
 
 ## Configuration
 
