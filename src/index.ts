@@ -5,6 +5,7 @@
 import { Server } from './server.js';
 import { createLogger, LogLevel, Logger } from './utils/logger.js';
 import type { ServerConfig } from './server.js';
+import { loadRecognitionConfig } from './services/provider-config.js';
 
 const log = createLogger('Main');
 
@@ -16,12 +17,6 @@ Logger.setLogLevel(logLevel as LogLevel);
  * Load configuration from environment variables
  */
 function loadConfig(): ServerConfig {
-  // Check for required environment variables
-  const apiKey = process.env.GOOGLE_API_KEY;
-  if (!apiKey) {
-    throw new Error('GOOGLE_API_KEY environment variable is required');
-  }
-
   // Determine transport type
   const transportType = process.env.TRANSPORT_TYPE === 'sse' ? 'sse' : 'stdio';
   
@@ -30,9 +25,7 @@ function loadConfig(): ServerConfig {
   const port = portStr ? parseInt(portStr, 10) : undefined;
   
   return {
-    gemini: {
-      apiKey
-    },
+    recognition: loadRecognitionConfig(),
     transport: transportType,
     port
   };

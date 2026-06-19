@@ -2,49 +2,26 @@
  * Video recognition tool for MCP server
  */
 
-import { z } from 'zod';
 import { createLogger } from '../utils/logger.js';
-import { GeminiService } from '../services/gemini.js';
-import { VideoRecognitionParamsSchema, FileState } from '../types/index.js';
+import { VideoRecognitionParamsSchema } from '../types/index.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { VideoRecognitionParams } from '../types/index.js';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
+import type { RecognitionProvider, VideoRecognitionParams } from '../types/index.js';
 
 const log = createLogger('VideoRecognitionTool');
 
-export const createVideoRecognitionTool = (geminiService: GeminiService) => {
+export const createVideoRecognitionTool = (recognitionProvider: RecognitionProvider) => {
   return {
     name: 'video_recognition',
-    description: 'Analyze and describe videos using Google Gemini AI',
+    description: `Analyze and describe videos. This tool uses ${recognitionProvider.info.modelName} via ${recognitionProvider.info.providerLabel} to parse and explain video content.`,
     inputSchema: VideoRecognitionParamsSchema,
     callback: async (args: VideoRecognitionParams): Promise<CallToolResult> => {
       try {
         log.info(`Processing video recognition request for file: ${args.filepath}`);
         log.verbose('Video recognition request', JSON.stringify(args));
         
-        // Verify file exists
-        if (!fs.existsSync(args.filepath)) {
-          throw new Error(`Video file not found: ${args.filepath}`);
-        }
-        
-        // Verify file is a video
-        const ext = path.extname(args.filepath).toLowerCase();
-        if (ext !== '.mp4' && ext !== '.mpeg' && ext !== '.mov' && ext !== '.avi' && ext !== '.webm') {
-          throw new Error(`Unsupported video format: ${ext}. Supported formats are: .mp4, .mpeg, .mov, .avi, .webm`);
-        }
-        
         // Default prompt if not provided
         const prompt = args.prompt || 'Describe this video';
-        const modelName = args.modelname || 'gemini-2.0-flash';
-        
-        // Upload the file - this will handle waiting for video processing
-        log.info('Uploading and processing video file...');
-        const file = await geminiService.uploadFile(args.filepath);
-        
-        // Process with Gemini
-        log.info('Video processing complete, generating content...');
-        const result = await geminiService.processFile(file, prompt, modelName);
+        const result = await recognitionProvider.recognize({ filepath: args.filepath, prompt, mediaKind: 'video' });
         
         if (result.isError) {
           log.error(`Error in video recognition: ${result.text}`);
