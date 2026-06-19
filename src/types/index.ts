@@ -10,8 +10,7 @@ import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
  */
 export const RecognitionParamsSchema = z.object({
   filepath: z.string().describe('Path to the media file to analyze'),
-  prompt: z.string().default('Describe this content').describe('Custom prompt for the recognition'),
-  modelname: z.string().default('gemini-2.0-flash').describe('Gemini model to use for recognition')
+  prompt: z.string().default('Describe this content').describe('Custom prompt for the recognition')
 });
 
 export type RecognitionParams = z.infer<typeof RecognitionParamsSchema>;
@@ -43,6 +42,49 @@ export interface ToolDefinition {
   inputSchema: z.ZodObject<any>;
   callback: (args: any) => Promise<CallToolResult>;
 }
+
+/**
+ * Provider-neutral recognition types
+ */
+export type RecognitionProviderName = 'gemini' | 'openai-compatible';
+
+export type MediaKind = 'image' | 'audio' | 'video';
+
+export interface RecognitionProviderInfo {
+  provider: RecognitionProviderName;
+  providerLabel: string;
+  modelName: string;
+}
+
+export interface RecognitionRequest {
+  filepath: string;
+  prompt: string;
+  mediaKind: MediaKind;
+}
+
+export interface RecognitionResult {
+  text: string;
+  isError?: boolean;
+}
+
+export interface RecognitionProvider {
+  readonly info: RecognitionProviderInfo;
+  recognize(request: RecognitionRequest): Promise<RecognitionResult>;
+}
+
+export interface GeminiRecognitionConfig extends RecognitionProviderInfo {
+  provider: 'gemini';
+  apiKey: string;
+}
+
+export interface OpenAICompatibleRecognitionConfig extends RecognitionProviderInfo {
+  provider: 'openai-compatible';
+  apiKey: string;
+  baseUrl: string;
+  maxInlineMediaBytes: number;
+}
+
+export type ResolvedRecognitionConfig = GeminiRecognitionConfig | OpenAICompatibleRecognitionConfig;
 
 /**
  * Gemini API types

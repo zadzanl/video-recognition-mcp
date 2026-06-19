@@ -8,30 +8,30 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { randomUUID } from 'crypto';
 import type { Request, Response } from 'express';
 import { createLogger } from './utils/logger.js';
-import { GeminiService } from './services/gemini.js';
+import { createRecognitionProvider } from './services/recognition-providers.js';
 import { createImageRecognitionTool } from './tools/image-recognition.js';
 import { createAudioRecognitionTool } from './tools/audio-recognition.js';
 import { createVideoRecognitionTool } from './tools/video-recognition.js';
-import type { GeminiConfig } from './types/index.js';
+import type { RecognitionProvider, ResolvedRecognitionConfig } from './types/index.js';
 
 const log = createLogger('Server');
 
 export interface ServerConfig {
-  gemini: GeminiConfig;
+  recognition: ResolvedRecognitionConfig;
   transport: 'stdio' | 'sse';
   port?: number;
 }
 
 export class Server {
   private readonly mcpServer: McpServer;
-  private readonly geminiService: GeminiService;
+  private readonly recognitionProvider: RecognitionProvider;
   private readonly config: ServerConfig;
 
   constructor(config: ServerConfig) {
     this.config = config;
     
-    // Initialize Gemini service
-    this.geminiService = new GeminiService(config.gemini);
+    // Initialize selected recognition provider
+    this.recognitionProvider = createRecognitionProvider(config.recognition);
     
     // Create MCP server
     this.mcpServer = new McpServer({
@@ -50,9 +50,9 @@ export class Server {
    */
   private registerTools(): void {
     // Create tools
-    const imageRecognitionTool = createImageRecognitionTool(this.geminiService);
-    const audioRecognitionTool = createAudioRecognitionTool(this.geminiService);
-    const videoRecognitionTool = createVideoRecognitionTool(this.geminiService);
+    const imageRecognitionTool = createImageRecognitionTool(this.recognitionProvider);
+    const audioRecognitionTool = createAudioRecognitionTool(this.recognitionProvider);
+    const videoRecognitionTool = createVideoRecognitionTool(this.recognitionProvider);
     
     // Register tools with MCP server
     this.mcpServer.tool(
