@@ -33,3 +33,9 @@ yarn-error.log*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local only, uncomment before push, comment when working
+media_examples/
+openspec/
+.agent/
+AGENTS.md
