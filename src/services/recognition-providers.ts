@@ -12,27 +12,82 @@ import type {
   ResolvedRecognitionConfig
 } from '../types/index.js';
 import { GeminiService } from './gemini.js';
+import { classifyGeminiError } from './gemini-error-classifier.js';
+import type { ErrorClassification } from './gemini-error-classifier.js';
 import { createBase64DataUrl, createRawBase64, validateMediaFile, audioFormatFromExtension } from './media.js';
 
 const log = createLogger('RecognitionProviders');
 
-class GeminiRecognitionProvider implements RecognitionProvider {
+export class GeminiRecognitionProvider implements RecognitionProvider {
   readonly info;
   private readonly geminiService: GeminiService;
 
-  constructor(private readonly config: GeminiRecognitionConfig) {
+  constructor(
+    private readonly config: GeminiRecognitionConfig,
+    geminiService?: GeminiService
+  ) {
     this.info = {
       provider: config.provider,
       providerLabel: config.providerLabel,
       modelName: config.modelName
     };
-    this.geminiService = new GeminiService({ apiKey: config.apiKey });
+    this.geminiService = geminiService ?? new GeminiService({ apiKey: config.apiKey });
   }
 
   async recognize(request: RecognitionRequest): Promise<RecognitionResult> {
+    // Defensive: empty modelNames is a configuration error.
+    if (!this.config.modelNames || this.config.modelNames.length === 0) {
+      log.error('Gemini configuration error: no model names configured');
+      return {
+        text: 'Gemini configuration error: no model names configured',
+        isError: true
+      };
+    }
+
     await validateMediaFile(this.info.providerLabel, this.info.provider, request.mediaKind, request.filepath);
+
+    // Upload / cache lookup once before the model attempt loop.
     const file = await this.geminiService.uploadFile(request.filepath);
-    return this.geminiService.processFile(file, request.prompt, this.config.modelName);
+
+    const attempted: Array<{ model: string; reason: string }> = [];
+
+    for (const modelName of this.config.modelNames) {
+      try {
+        log.info(`Attempting Gemini generation with model ${modelName}`);
+        const result = await this.geminiService.processFile(file, request.prompt, modelName);
+
+        // Success
+        if (attempted.length > 0) {
+          log.info(`Gemini fallback succeeded with model ${modelName} after attempting ${attempted.map(a => a.model).join(', ')}`);
+        } else {
+          log.info(`Gemini generation succeeded with primary model ${modelName}`);
+        }
+        return result;
+      } catch (error) {
+        const classification: ErrorClassification = classifyGeminiError(error);
+        log.warn(`Gemini model ${modelName} failed: ${classification.reason}`);
+
+        if (!classification.retryable) {
+          // Fail-fast: do not attempt further models.
+          log.error(`Gemini fail-fast error on model ${modelName}: ${classification.reason}`);
+          return {
+            text: `Gemini generation failed: ${classification.reason}`,
+            isError: true
+          };
+        }
+
+        // Fallback-eligible: record and try next model.
+        attempted.push({ model: modelName, reason: classification.reason });
+      }
+    }
+
+    // Exhausted all configured models.
+    const modelList = attempted.map(a => `${a.model} (${a.reason})`).join(', ');
+    log.error(`Gemini model fallback exhausted. Attempted: ${modelList}`);
+    return {
+      text: `Gemini model fallback exhausted. Attempted models: ${modelList}`,
+      isError: true
+    };
   }
 }
 

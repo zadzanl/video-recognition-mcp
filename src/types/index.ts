@@ -75,6 +75,8 @@ export interface RecognitionProvider {
 export interface GeminiRecognitionConfig extends RecognitionProviderInfo {
   provider: 'gemini';
   apiKey: string;
+  /** Ordered list of model IDs for fallback. First is primary. */
+  modelNames: string[];
 }
 
 export interface OpenAICompatibleRecognitionConfig extends RecognitionProviderInfo {

@@ -235,35 +235,25 @@ export class GeminiService {
   }
 
   /**
-   * Process a file with Gemini API
+   * Process a file with Gemini API.
+   *
+   * Throws on generation errors so callers can classify them for fallback decisions.
    */
   async processFile(file: GeminiFile, prompt: string, modelName: string): Promise<GeminiResponse> {
-    try {
-      log.debug(`Processing file with model ${modelName}`);
-      log.verbose('Processing with parameters', JSON.stringify({ file, prompt, modelName }));
-      
-      const response = await this.client.models.generateContent({
-        model: modelName,
-        contents: createUserContent([
-          createPartFromUri(file.uri, file.mimeType),
-          prompt
-        ])
-      });
-      
-      log.debug('Received response from Gemini API');
-      log.verbose('Gemini API response', JSON.stringify(response));
-      
-      const responseText = response.text || '';
-      
-      return {
-        text: responseText
-      };
-    } catch (error) {
-      log.error('Error processing file with Gemini API', error);
-      return {
-        text: `Error processing file: ${error instanceof Error ? error.message : String(error)}`,
-        isError: true
-      };
-    }
+    log.debug(`Processing file with model ${modelName}`);
+
+    const response = await this.client.models.generateContent({
+      model: modelName,
+      contents: createUserContent([
+        createPartFromUri(file.uri, file.mimeType),
+        prompt
+      ])
+    });
+
+    log.debug(`Received response from Gemini API (model ${modelName})`);
+
+    const responseText = response.text || '';
+
+    return { text: responseText };
   }
 }
