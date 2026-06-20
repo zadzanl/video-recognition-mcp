@@ -33,3 +33,7 @@ yarn-error.log*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local only stuffs
+openspec/
+media_examples/
