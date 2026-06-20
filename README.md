@@ -88,8 +88,9 @@ The server is configured using environment variables. Provider/model selection i
 | Variable | Description |
 |----------|-------------|
 | `RECOGNITION_PROVIDER` | Optional. Supported values: `gemini` or `openai-compatible`. Explicit selection wins. |
-| `GOOGLE_API_KEY` | Gemini API key. Required when provider resolution selects Gemini. |
-| `GEMINI_MODEL` | Optional Gemini model. Defaults to `gemini-2.0-flash`. |
+| `GOOGLE_API_KEY` | Gemini API key. Required when provider resolution selects Gemini. All fallback attempts share the same key and project quota pool. |
+| `GEMINI_MODEL` | Optional single Gemini model. Disables fallback — only one model is tried. Do not set with `GEMINI_MODELS`. |
+| `GEMINI_MODELS` | Optional comma-separated ordered list of Gemini model IDs for fallback. Duplicate IDs are removed (first occurrence kept). Do not set with `GEMINI_MODEL`. |
 | `OPENAI_COMPATIBLE_API_KEY` | API key for the configured OpenAI-compatible endpoint. Required in OpenAI-compatible mode. |
 | `OPENAI_COMPATIBLE_BASE_URL` | Base URL for the OpenAI-compatible API, without `/chat/completions`; for example `https://openrouter.ai/api/v1`. |
 | `OPENAI_COMPATIBLE_MODEL` | Provider-specific model ID; for example `xiaomi/mimo-v2.5` on OpenRouter or `mimo-v2.5` on Xiaomi MiMo's direct endpoint. |
@@ -102,6 +103,32 @@ Provider resolution is intentionally conservative:
 - If `RECOGNITION_PROVIDER` is omitted and only `GOOGLE_API_KEY` is configured, Gemini is used.
 - If `RECOGNITION_PROVIDER` is omitted, `GOOGLE_API_KEY` is absent, and a complete OpenAI-compatible config is present, OpenAI-compatible mode is used.
 - If both Gemini and OpenAI-compatible config are present and `RECOGNITION_PROVIDER` is omitted, startup fails and asks you to set `RECOGNITION_PROVIDER` explicitly.
+
+### Gemini Model Fallback
+
+When Gemini mode is selected, the server can try multiple models in sequence until one succeeds. This is useful for working around model-specific rate limits, regional availability issues, or quota exhaustion.
+
+**Default chain (no override):**
+`gemini-3.5-flash` → `gemini-3-flash-preview` → `gemini-2.5-flash` → `gemini-3.1-flash-lite`
+
+All attempts use the same `GOOGLE_API_KEY` and the same Google Cloud project quota pool.
+
+**Single-model override (`GEMINI_MODEL`):**
+```bash
+GEMINI_MODEL=gemini-3.5-flash GOOGLE_API_KEY=your_api_key npm start
+```
+Only the specified model is tried. Multi-model fallback is disabled.
+
+**Ordered list override (`GEMINI_MODELS`):**
+```bash
+GEMINI_MODELS=gemini-3.5-flash,gemini-2.5-flash GOOGLE_API_KEY=your_api_key npm start
+```
+Duplicates are removed while preserving first-occurrence order. An empty list after parsing fails startup.
+
+**Conflict:**
+Setting **both** `GEMINI_MODEL` and `GEMINI_MODELS` fails startup with an ambiguity error. Use one or the other.
+
+**Tool descriptions** display the effective model configuration — a single model name when no fallback is configured, or `primary + N fallback model(s)` when a fallback chain is in use.
 
 ### Gemini Mode
 
@@ -266,6 +293,13 @@ GOOGLE_API_KEY=your_api_key npm run dev
 - `src/services/`: Provider resolution, media helpers, Gemini API, and OpenAI-compatible provider implementation
 - `src/types/`: Type definitions
 - `src/utils/`: Utility functions
+
+## Gemini Caveats
+
+- **Preview models** (e.g., `gemini-3-flash-preview`) can have tighter rate limits and shorter lifecycles than stable models. Google may deprecate or change them without notice, which could cause fallback attempts to skip to the next model or fail entirely if no stable model is in the chain.
+- **Rate limits are per Google Cloud project**, not per API key. Using multiple API keys that share the same project does not increase quota — all keys draw from the same project-level pool.
+- **Fallback does not guarantee quota or availability.** If all configured models are rate-limited, unavailable, or unsupported in your region, fallback exhaustion returns an error listing each attempted model and its failure reason.
+- **Fallback is Gemini-only.** The OpenAI-compatible provider uses a single model configured via `OPENAI_COMPATIBLE_MODEL` and has no fallback chain. Its behavior is independent of Gemini model configuration.
 
 ## Security & Privacy
 
