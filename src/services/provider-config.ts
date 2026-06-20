@@ -4,12 +4,96 @@
 
 import type { ResolvedRecognitionConfig, RecognitionProviderName } from '../types/index.js';
 
-export const DEFAULT_GEMINI_MODEL = 'gemini-2.0-flash';
+export const DEFAULT_GEMINI_MODELS: string[] = [
+  'gemini-3.5-flash',
+  'gemini-3-flash-preview',
+  'gemini-2.5-flash',
+  'gemini-3.1-flash-lite'
+];
 export const DEFAULT_MAX_INLINE_MEDIA_BYTES = 20 * 1024 * 1024;
 
 function readEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const value = env[name]?.trim();
   return value ? value : undefined;
+}
+
+/**
+ * Parse GEMINI_MODELS into a deduplicated ordered list.
+ * Throws if the resulting list is empty after trimming blanks and comma separators.
+ */
+export function parseGeminiModelList(raw: string | undefined): string[] {
+  if (raw === undefined) {
+    return [];
+  }
+
+  const models = raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+
+  if (models.length === 0) {
+    throw new Error(
+      'GEMINI_MODELS must contain at least one model ID (value was empty after trimming blanks and comma separators)'
+    );
+  }
+
+  // Deduplicate, preserving first occurrence order
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const model of models) {
+    if (!seen.has(model)) {
+      seen.add(model);
+      deduped.push(model);
+    }
+  }
+
+  return deduped;
+}
+
+/**
+ * Resolve the effective ordered Gemini model list from environment variables.
+ *
+ * - If only GEMINI_MODEL is set: returns [GEMINI_MODEL] (single model, no fallback).
+ * - If only GEMINI_MODELS is set: returns parsed, deduplicated list.
+ * - If both are set: throws ambiguity error.
+ * - If neither is set: returns DEFAULT_GEMINI_MODELS.
+ */
+export function resolveGeminiModelNames(env: NodeJS.ProcessEnv): string[] {
+  const geminiModel = readEnv(env, 'GEMINI_MODEL');
+  const geminiModelsPresent = Object.prototype.hasOwnProperty.call(env, 'GEMINI_MODELS');
+  const geminiModelsRaw = geminiModelsPresent ? (env['GEMINI_MODELS'] ?? '') : undefined;
+
+  if (geminiModel && geminiModelsPresent) {
+    throw new Error(
+      'Ambiguous Gemini model configuration: both GEMINI_MODEL and GEMINI_MODELS are set. ' +
+      'Use GEMINI_MODEL for a single model or GEMINI_MODELS for a comma-separated ordered model list, but not both.'
+    );
+  }
+
+  if (geminiModel) {
+    return [geminiModel];
+  }
+
+  if (geminiModelsPresent) {
+    return parseGeminiModelList(geminiModelsRaw);
+  }
+
+  return [...DEFAULT_GEMINI_MODELS];
+}
+
+/**
+ * Build a human-readable model display label for tool descriptions.
+ */
+export function formatModelDisplayLabel(modelNames: string[]): string {
+  if (modelNames.length === 0) {
+    return '';
+  }
+  if (modelNames.length === 1) {
+    return modelNames[0];
+  }
+  const fallbackCount = modelNames.length - 1;
+  const plural = fallbackCount === 1 ? '' : 's';
+  return `${modelNames[0]} + ${fallbackCount} fallback model${plural}`;
 }
 
 function parseMaxInlineMediaBytes(rawValue: string | undefined): number {
@@ -48,7 +132,6 @@ function parseProvider(rawProvider: string | undefined): RecognitionProviderName
 export function loadRecognitionConfig(env: NodeJS.ProcessEnv = process.env): ResolvedRecognitionConfig {
   const explicitProvider = parseProvider(readEnv(env, 'RECOGNITION_PROVIDER'));
   const googleApiKey = readEnv(env, 'GOOGLE_API_KEY');
-  const geminiModel = readEnv(env, 'GEMINI_MODEL') || DEFAULT_GEMINI_MODEL;
 
   const openAIKey = readEnv(env, 'OPENAI_COMPATIBLE_API_KEY');
   const openAIBaseUrl = readEnv(env, 'OPENAI_COMPATIBLE_BASE_URL');
@@ -76,10 +159,12 @@ export function loadRecognitionConfig(env: NodeJS.ProcessEnv = process.env): Res
   })();
 
   if (selectedProvider === 'gemini') {
+    const modelNames = resolveGeminiModelNames(env);
     return {
       provider: 'gemini',
       providerLabel: 'Google Gemini',
-      modelName: geminiModel,
+      modelName: formatModelDisplayLabel(modelNames),
+      modelNames,
       apiKey: requireValue(googleApiKey, 'GOOGLE_API_KEY', 'Gemini')
     };
   }
