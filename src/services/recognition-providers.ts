@@ -15,12 +15,44 @@ import { GeminiService } from './gemini.js';
 import { classifyGeminiError } from './gemini-error-classifier.js';
 import type { ErrorClassification } from './gemini-error-classifier.js';
 import { createBase64DataUrl, createRawBase64, validateMediaFile, audioFormatFromExtension } from './media.js';
+import { RateLimitTracker } from './rate-limit-tracker.js';
+import { ThrottlingScheduler } from './throttling-scheduler.js';
+import { DEFAULT_MAX_INLINE_MEDIA_BYTES } from './provider-config.js';
 
 const log = createLogger('RecognitionProviders');
+
+function classifyOpenAiError(message: string): { retryable: boolean; reason: string } {
+  const msg = message.toUpperCase();
+  if (/401|UNAUTHORIZED|INVALID API KEY|INVALID_API_KEY/i.test(msg)) {
+    return { retryable: false, reason: 'unauthenticated' };
+  }
+  if (/403|FORBIDDEN|PERMISSION_DENIED/i.test(msg)) {
+    return { retryable: false, reason: 'permission denied' };
+  }
+  if (/400|INVALID_ARGUMENT|INVALID_REQUEST|MALFORMED|UNSUPPORTED/i.test(msg)) {
+    return { retryable: false, reason: 'invalid request/argument' };
+  }
+  if (/429|RATE LIMIT|TOO MANY REQUESTS|RESOURCE_EXHAUSTED/i.test(msg)) {
+    return { retryable: true, reason: 'rate limited (429)' };
+  }
+  if (/500|INTERNAL SERVER/i.test(msg)) {
+    return { retryable: true, reason: 'internal server error (500)' };
+  }
+  if (/503|SERVICE UNAVAILABLE/i.test(msg)) {
+    return { retryable: true, reason: 'service unavailable (503)' };
+  }
+  if (/TIMEOUT|DEADLINE_EXCEEDED|ABORTED|ETIMEDOUT|ECONNRESET/i.test(msg)) {
+    return { retryable: true, reason: 'timeout or connection reset' };
+  }
+  // Safe default for general errors is fail-fast
+  return { retryable: false, reason: message };
+}
 
 export class GeminiRecognitionProvider implements RecognitionProvider {
   readonly info;
   private readonly geminiService: GeminiService;
+  private readonly tracker: RateLimitTracker;
+  private readonly scheduler: ThrottlingScheduler;
 
   constructor(
     private readonly config: GeminiRecognitionConfig,
@@ -32,6 +64,8 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
       modelName: config.modelName
     };
     this.geminiService = geminiService ?? new GeminiService({ apiKey: config.apiKey });
+    this.tracker = new RateLimitTracker();
+    this.scheduler = new ThrottlingScheduler(this.tracker);
   }
 
   async recognize(request: RecognitionRequest): Promise<RecognitionResult> {
@@ -46,44 +80,133 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
 
     await validateMediaFile(this.info.providerLabel, this.info.provider, request.mediaKind, request.filepath);
 
-    // Upload / cache lookup once before the model attempt loop.
-    const file = await this.geminiService.uploadFile(request.filepath);
+    // Build overall fallback routing model candidate list:
+    // Gemini models -> OpenRouter models -> MiMo models
+    const candidates = [...this.config.modelNames];
+    if (this.config.openRouterApiKey && this.config.openRouterModels) {
+      candidates.push(...this.config.openRouterModels);
+    }
+    if (this.config.mimoApiKey && this.config.mimoModels) {
+      candidates.push(...this.config.mimoModels);
+    }
 
     const attempted: Array<{ model: string; reason: string }> = [];
+    let geminiFile: any = null;
 
-    for (const modelName of this.config.modelNames) {
+    while (true) {
+      // Get remaining candidates that have not been attempted yet
+      const remainingCandidates = candidates.filter(c => !attempted.some(a => a.model === c));
+      if (remainingCandidates.length === 0) {
+        break;
+      }
+
+      let selectedModel: string;
       try {
-        log.info(`Attempting Gemini generation with model ${modelName}`);
-        const result = await this.geminiService.processFile(file, request.prompt, modelName);
+        selectedModel = await this.scheduler.scheduleRequest(
+          remainingCandidates,
+          request.mediaKind,
+          this.config.rateLimitMaxWaitMs ?? 30000
+        );
+      } catch (err) {
+        const timeoutMsg = err instanceof Error ? err.message : String(err);
+        log.error(`Rate-limit recovery routing exhausted: ${timeoutMsg}`);
+        return {
+          text: `Rate-limit recovery routing exhausted: ${timeoutMsg}. Attempted: ${attempted.map(a => `${a.model} (${a.reason})`).join(', ')}`,
+          isError: true
+        };
+      }
 
-        // Success
-        if (attempted.length > 0) {
-          log.info(`Gemini fallback succeeded with model ${modelName} after attempting ${attempted.map(a => a.model).join(', ')}`);
+      try {
+        if (this.config.modelNames.includes(selectedModel)) {
+          // Gemini model attempt
+          if (!geminiFile) {
+            log.debug(`Uploading media file for Gemini models: ${request.filepath}`);
+            geminiFile = await this.geminiService.uploadFile(request.filepath);
+          }
+          log.info(`Attempting Gemini generation with model ${selectedModel}`);
+          const result = await this.geminiService.processFile(geminiFile, request.prompt, selectedModel);
+          
+          if (attempted.length > 0) {
+            log.info(`Gemini fallback succeeded with model ${selectedModel} after attempting ${attempted.map(a => a.model).join(', ')}`);
+          } else {
+            log.info(`Gemini generation succeeded with primary model ${selectedModel}`);
+          }
+          return result;
+        } else if (this.config.openRouterApiKey && this.config.openRouterModels?.includes(selectedModel)) {
+          // OpenRouter model attempt
+          log.info(`Attempting OpenRouter generation with model ${selectedModel}`);
+          const openRouterConfig = {
+            provider: 'openai-compatible' as const,
+            providerLabel: 'OpenRouter',
+            modelName: selectedModel,
+            apiKey: this.config.openRouterApiKey,
+            baseUrl: 'https://openrouter.ai/api/v1',
+            maxInlineMediaBytes: DEFAULT_MAX_INLINE_MEDIA_BYTES
+          };
+          const provider = new OpenAICompatibleRecognitionProvider(openRouterConfig);
+          const result = await provider.recognize(request);
+          if (result.isError) {
+            const classification = classifyOpenAiError(result.text);
+            log.warn(`OpenRouter model ${selectedModel} failed: ${classification.reason}`);
+            if (!classification.retryable) {
+              log.error(`OpenRouter fail-fast error on model ${selectedModel}: ${classification.reason}`);
+              return result; // Fail-fast immediately
+            }
+            this.tracker.markCooldown(selectedModel);
+            attempted.push({ model: selectedModel, reason: classification.reason });
+            continue;
+          }
+          return result;
+        } else if (this.config.mimoApiKey && this.config.mimoModels?.includes(selectedModel)) {
+          // MiMo model attempt
+          log.info(`Attempting MiMo generation with model ${selectedModel}`);
+          const mimoConfig = {
+            provider: 'openai-compatible' as const,
+            providerLabel: 'MiMo',
+            modelName: selectedModel,
+            apiKey: this.config.mimoApiKey,
+            baseUrl: this.config.mimoBaseUrl || 'https://api.xiaomimimo.com/v1',
+            maxInlineMediaBytes: DEFAULT_MAX_INLINE_MEDIA_BYTES
+          };
+          const provider = new OpenAICompatibleRecognitionProvider(mimoConfig);
+          const result = await provider.recognize(request);
+          if (result.isError) {
+            const classification = classifyOpenAiError(result.text);
+            log.warn(`MiMo model ${selectedModel} failed: ${classification.reason}`);
+            if (!classification.retryable) {
+              log.error(`MiMo fail-fast error on model ${selectedModel}: ${classification.reason}`);
+              return result; // Fail-fast immediately
+            }
+            this.tracker.markCooldown(selectedModel);
+            attempted.push({ model: selectedModel, reason: classification.reason });
+            continue;
+          }
+          return result;
         } else {
-          log.info(`Gemini generation succeeded with primary model ${modelName}`);
+          throw new Error(`Unknown model in routing chain: ${selectedModel}`);
         }
-        return result;
       } catch (error) {
         const classification: ErrorClassification = classifyGeminiError(error);
-        log.warn(`Gemini model ${modelName} failed: ${classification.reason}`);
+        log.warn(`Model ${selectedModel} failed: ${classification.reason}`);
 
         if (!classification.retryable) {
-          // Fail-fast: do not attempt further models.
-          log.error(`Gemini fail-fast error on model ${modelName}: ${classification.reason}`);
+          // Fail-fast: do not attempt further models or providers.
+          log.error(`Fail-fast error on model ${selectedModel}: ${classification.reason}`);
           return {
             text: `Gemini generation failed: ${classification.reason}`,
             isError: true
           };
         }
 
-        // Fallback-eligible: record and try next model.
-        attempted.push({ model: modelName, reason: classification.reason });
+        // Fallback-eligible: mark model as cooling down, record, and loop to try next scheduled model
+        this.tracker.markCooldown(selectedModel);
+        attempted.push({ model: selectedModel, reason: classification.reason });
       }
     }
 
     // Exhausted all configured models.
     const modelList = attempted.map(a => `${a.model} (${a.reason})`).join(', ');
-    log.error(`Gemini model fallback exhausted. Attempted: ${modelList}`);
+    log.error(`Model fallback exhausted. Attempted: ${modelList}`);
     return {
       text: `Gemini model fallback exhausted. Attempted models: ${modelList}`,
       isError: true

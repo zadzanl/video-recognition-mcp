@@ -1,0 +1,68 @@
+{
+  "models": {
+    "gemini-3.5-flash": {
+      "Short_limit_duration_in_seconds": 60,
+      "Long_limit_duration_in_seconds": 86400,
+      "Short_limit_request_cap": 5,
+      "Long_limit_request_cap": 20,
+      "Short_limit_token_cap": 100000,
+      "Long_limit_token_cap": 500000
+    },
+    "gemini-3-flash-preview": {
+      "Short_limit_duration_in_seconds": 60,
+      "Long_limit_duration_in_seconds": 86400,
+      "Short_limit_request_cap": 5,
+      "Long_limit_request_cap": 20,
+      "Short_limit_token_cap": 100000,
+      "Long_limit_token_cap": 500000
+    },
+    "gemini-2.5-flash": {
+      "Short_limit_duration_in_seconds": 60,
+      "Long_limit_duration_in_seconds": 86400,
+      "Short_limit_request_cap": 5,
+      "Long_limit_request_cap": 20,
+      "Short_limit_token_cap": 100000,
+      "Long_limit_token_cap": 500000
+    },
+    "gemini-3.1-flash-lite": {
+      "Short_limit_duration_in_seconds": 60,
+      "Long_limit_duration_in_seconds": 86400,
+      "Short_limit_request_cap": 15,
+      "Long_limit_request_cap": 100,
+      "Short_limit_token_cap": 200000,
+      "Long_limit_token_cap": 1000000
+    },
+    "google/gemini-2.5-flash": {
+      "Short_limit_duration_in_seconds": 60,
+      "Long_limit_duration_in_seconds": 86400,
+      "Short_limit_request_cap": 10,
+      "Long_limit_request_cap": 50,
+      "Short_limit_token_cap": 200000,
+      "Long_limit_token_cap": 1000000
+    },
+    "google/gemini-2.5-pro": {
+      "Short_limit_duration_in_seconds": 60,
+      "Long_limit_duration_in_seconds": 86400,
+      "Short_limit_request_cap": 5,
+      "Long_limit_request_cap": 20,
+      "Short_limit_token_cap": 100000,
+      "Long_limit_token_cap": 500000
+    },
+    "xiaomi/mimo-v2.5": {
+      "Short_limit_duration_in_seconds": 60,
+      "Long_limit_duration_in_seconds": 86400,
+      "Short_limit_request_cap": 10,
+      "Long_limit_request_cap": 50,
+      "Short_limit_token_cap": 200000,
+      "Long_limit_token_cap": 1000000
+    },
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
+      "Short_limit_duration_in_seconds": 60,
+      "Long_limit_duration_in_seconds": 86400,
+      "Short_limit_request_cap": 10,
+      "Long_limit_request_cap": 50,
+      "Short_limit_token_cap": 200000,
+      "Long_limit_token_cap": 1000000
+    }
+  }
+}

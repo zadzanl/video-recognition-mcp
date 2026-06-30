@@ -96,6 +96,12 @@ The server is configured using environment variables. Provider/model selection i
 | `OPENAI_COMPATIBLE_MODEL` | Provider-specific model ID; for example `xiaomi/mimo-v2.5` on OpenRouter or `mimo-v2.5` on Xiaomi MiMo's direct endpoint. |
 | `OPENAI_COMPATIBLE_PROVIDER_LABEL` | Optional human-readable provider label used in tool descriptions; for example `OpenRouter`. |
 | `MAX_INLINE_MEDIA_BYTES` | Optional maximum local file size for OpenAI-compatible base64 request bodies. Defaults to `20971520` bytes (20 MiB). |
+| `OPENROUTER_API_KEY` | Optional. API key for OpenRouter to enable cross-provider failover routing when Google Gemini rate limits are hit. |
+| `OPENROUTER_MODELS` | Optional comma-separated list of models to use on OpenRouter fallback (default: `google/gemini-2.5-flash,google/gemini-2.5-pro,openai/gpt-4o-mini`). |
+| `MIMO_API_KEY` | Optional. API key for Xiaomi MiMo to enable cross-provider failover routing when Gemini and OpenRouter are exhausted. |
+| `MIMO_MODELS` | Optional comma-separated list of models to use on MiMo fallback (default: `mimo-v2.5`). |
+| `MIMO_BASE_URL` | Optional. Base URL for MiMo API (default: `https://api.xiaomimimo.com/v1`). |
+| `RATE_LIMIT_MAX_WAIT_MS` | Optional. Maximum time (in milliseconds) the throttling queue will sleep and wait for rate-limiting slots before returning a timeout (default: `30000`). |
 
 Provider resolution is intentionally conservative:
 
@@ -129,6 +135,22 @@ Duplicates are removed while preserving first-occurrence order. An empty list af
 Setting **both** `GEMINI_MODEL` and `GEMINI_MODELS` fails startup with an ambiguity error. Use one or the other.
 
 **Tool descriptions** display the effective model configuration — a single model name when no fallback is configured, or `primary + N fallback model(s)` when a fallback chain is in use.
+
+### Rate Limiting, Auto Recovery, and Cross-Provider Fallback
+
+To handle rate limits and transient availability issues under high concurrency (e.g., parallel tool calls from a client), the server implements:
+- **Auto Recovery**: The server manages rate limits on the tool side. Instead of failing the tool call when a model hits a rate limit, the request is either re-routed to another model (e.g., `gemini-3.5-flash` → `gemini-3-flash-preview`) or queued/throttled internally (sleeping and polling), meaning the call may take longer to complete but will succeed.
+- **File-Backed Rate Limit Tracker**: A persistent JSON state file (`mcp-video-recognition-rate-limits.json` in the system temp directory) tracks active request counts and model cooldown states across server worker processes and restarts.
+- **Human-Editable Limits File**: Configure request and token limits in `config/throttling-limits.json`. The keys define short/long durations, request caps, and token limits:
+  * `Short_limit_duration_in_seconds`
+  * `Long_limit_duration_in_seconds`
+  * `Short_limit_request_cap`
+  * `Long_limit_request_cap`
+  * `Short_limit_token_cap`
+  * `Long_limit_token_cap`
+- **Cross-Provider Failover**: If all Google Gemini models fail or are cooling down, the server will route to OpenRouter models (if `OPENROUTER_API_KEY` is set), then MiMo models (if `MIMO_API_KEY` is set).
+- **Strict Error Isolation**: Only rate-limiting/quota errors (such as 429, resource exhausted, or rate-limit-induced billing/precondition issues) and transient server errors (500/503) trigger model or provider fallback. Real authentication failures (401), invalid arguments, malformed prompts, and file upload/processing failures fail fast immediately.
+- **API Key Secrecy**: No API keys or credentials are ever written to the persistent tracker state file, recorded in logs, or exposed in error messages.
 
 ### Gemini Mode
 

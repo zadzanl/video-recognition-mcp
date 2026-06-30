@@ -8,7 +8,7 @@
  * agent_notes: "Tests for classifyGeminiError and GeminiRecognitionProvider fallback loop."
  */
 
-import { describe, it, before, after } from 'node:test';
+import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -22,6 +22,7 @@ import type {
   RecognitionRequest,
   RecognitionResult
 } from '../types/index.js';
+import { RateLimitTracker } from '../services/rate-limit-tracker.js';
 
 // ---------------------------------------------------------------------------
 // classifyGeminiError — retryable / fallback-eligible
@@ -282,6 +283,7 @@ describe('GeminiRecognitionProvider fallback loop', () => {
 
   before(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-fallback-test-'));
+    process.env.RATE_LIMIT_TRACKER_PATH = path.join(tmpDir, 'mcp-rate-limits-test.json');
     testImagePath = path.join(tmpDir, 'test-image.png');
     // Create a minimal valid PNG file (1x1 pixel).
     const minimalPng = Buffer.from(
@@ -291,7 +293,12 @@ describe('GeminiRecognitionProvider fallback loop', () => {
     fs.writeFileSync(testImagePath, minimalPng);
   });
 
+  beforeEach(() => {
+    new RateLimitTracker().clearAll();
+  });
+
   after(() => {
+    delete process.env.RATE_LIMIT_TRACKER_PATH;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 

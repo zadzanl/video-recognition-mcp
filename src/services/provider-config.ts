@@ -129,6 +129,34 @@ function parseProvider(rawProvider: string | undefined): RecognitionProviderName
   throw new Error(`Unsupported RECOGNITION_PROVIDER '${rawProvider}'. Supported providers: gemini, openai-compatible`);
 }
 
+function parseModelList(raw: string | undefined, defaultList: string[]): string[] {
+  if (raw === undefined || raw.trim() === '') {
+    return defaultList;
+  }
+  const models = raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+  
+  // Deduplicate preserving order
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const m of models) {
+    if (!seen.has(m)) {
+      seen.add(m);
+      deduped.push(m);
+    }
+  }
+  return deduped;
+}
+
+function parseMaxWaitMs(raw: string | undefined): number {
+  if (!raw) return 30000;
+  const parsed = Number(raw);
+  if (isNaN(parsed) || parsed < 0) return 30000;
+  return parsed;
+}
+
 export function loadRecognitionConfig(env: NodeJS.ProcessEnv = process.env): ResolvedRecognitionConfig {
   const explicitProvider = parseProvider(readEnv(env, 'RECOGNITION_PROVIDER'));
   const googleApiKey = readEnv(env, 'GOOGLE_API_KEY');
@@ -160,12 +188,33 @@ export function loadRecognitionConfig(env: NodeJS.ProcessEnv = process.env): Res
 
   if (selectedProvider === 'gemini') {
     const modelNames = resolveGeminiModelNames(env);
+    
+    // Fallback providers configuration
+    const openRouterApiKey = readEnv(env, 'OPENROUTER_API_KEY');
+    const openRouterModels = parseModelList(
+      readEnv(env, 'OPENROUTER_MODELS'),
+      ['google/gemini-2.5-flash', 'google/gemini-2.5-pro', 'openai/gpt-4o-mini']
+    );
+    const mimoApiKey = readEnv(env, 'MIMO_API_KEY');
+    const mimoModels = parseModelList(
+      readEnv(env, 'MIMO_MODELS'),
+      ['mimo-v2.5']
+    );
+    const mimoBaseUrl = readEnv(env, 'MIMO_BASE_URL') || 'https://api.xiaomimimo.com/v1';
+    const rateLimitMaxWaitMs = parseMaxWaitMs(readEnv(env, 'RATE_LIMIT_MAX_WAIT_MS'));
+
     return {
       provider: 'gemini',
       providerLabel: 'Google Gemini',
       modelName: formatModelDisplayLabel(modelNames),
       modelNames,
-      apiKey: requireValue(googleApiKey, 'GOOGLE_API_KEY', 'Gemini')
+      apiKey: requireValue(googleApiKey, 'GOOGLE_API_KEY', 'Gemini'),
+      openRouterApiKey,
+      openRouterModels,
+      mimoApiKey,
+      mimoModels,
+      mimoBaseUrl,
+      rateLimitMaxWaitMs
     };
   }
 

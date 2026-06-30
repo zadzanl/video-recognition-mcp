@@ -97,14 +97,24 @@ export function classifyGeminiError(error: unknown): ErrorClassification {
     // This order ensures 403 + PERMISSION_DENIED/BILLING/FAILED_PRECONDITION
     // gets a specific reason, not just "forbidden (403)".
 
+    const isRateOrTierLimit = /QUOTA|LIMIT|EXHAUSTED|RATE|TIER|FREE/.test(tokens);
+
     if (/PERMISSION_DENIED/.test(tokens))
       return { retryable: false, reason: 'permission denied' };
     if (/UNAUTHENTICATED/.test(tokens))
       return { retryable: false, reason: 'unauthenticated' };
-    if (/BILLING/.test(tokens))
+    if (/BILLING/.test(tokens)) {
+      if (isRateOrTierLimit) {
+        return { retryable: true, reason: 'rate limit or tier constraint (billing token)' };
+      }
       return { retryable: false, reason: 'billing/account issue' };
-    if (/FAILED_PRECONDITION/.test(tokens))
+    }
+    if (/FAILED_PRECONDITION/.test(tokens)) {
+      if (isRateOrTierLimit) {
+        return { retryable: true, reason: 'rate limit or tier constraint (precondition token)' };
+      }
       return { retryable: false, reason: 'precondition/account issue' };
+    }
     if (/INVALID_ARGUMENT|INVALID_REQUEST/.test(tokens))
       return { retryable: false, reason: 'invalid argument/request' };
     if (/UNSUPPORTED|NOT_FOUND/.test(tokens))

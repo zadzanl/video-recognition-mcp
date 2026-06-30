@@ -10,8 +10,7 @@
     "dev": "tsc -w & node --watch dist/index.js",
     "debug": "tsc & npx @modelcontextprotocol/inspector node dist/index.js",
     "lint": "eslint src --ext .ts",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "test:fallback": "tsc && node --test dist/tests/provider-config.test.js dist/tests/fallback.test.js"
+    "test": "tsc && node --test dist/tests/provider-config.test.js dist/tests/fallback.test.js dist/tests/routing.test.js"
   },
   "keywords": [
     "mcp",

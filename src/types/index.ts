@@ -77,6 +77,12 @@ export interface GeminiRecognitionConfig extends RecognitionProviderInfo {
   apiKey: string;
   /** Ordered list of model IDs for fallback. First is primary. */
   modelNames: string[];
+  openRouterApiKey?: string;
+  openRouterModels?: string[];
+  mimoApiKey?: string;
+  mimoModels?: string[];
+  mimoBaseUrl?: string;
+  rateLimitMaxWaitMs?: number;
 }
 
 export interface OpenAICompatibleRecognitionConfig extends RecognitionProviderInfo {
