@@ -35,5 +35,6 @@ yarn-error.log*
 Thumbs.db
 
 # Local only stuffs
-openspec/
-media_examples/
+# added to global git exclude instead
+# openspec/
+# media_examples/
