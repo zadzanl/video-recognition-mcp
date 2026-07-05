@@ -4,15 +4,25 @@
 
 import { createLogger } from '../utils/logger.js';
 import { ImageRecognitionParamsSchema } from '../types/index.js';
+import { ParallelDispatcher } from '../services/parallel-dispatcher.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { ImageRecognitionParams, RecognitionProvider } from '../types/index.js';
+import type { ImageRecognitionParams, ParallelInferenceConfig, RecognitionProvider } from '../types/index.js';
 
 const log = createLogger('ImageRecognitionTool');
 
-export const createImageRecognitionTool = (recognitionProvider: RecognitionProvider) => {
+type ParallelDispatch = Pick<ParallelDispatcher, 'dispatch'>;
+
+export const createImageRecognitionTool = (
+  recognitionProvider: RecognitionProvider,
+  parallelConfig?: ParallelInferenceConfig,
+  parallelDispatcher?: ParallelDispatch
+) => {
+  const baseDescription = `Analyze and describe images. This tool uses ${recognitionProvider.info.modelName} via ${recognitionProvider.info.providerLabel} to parse and explain image content.`;
+  const activeParallelDispatcher = resolveParallelDispatcher(parallelConfig, parallelDispatcher);
+
   return {
     name: 'image_recognition',
-    description: `Analyze and describe images. This tool uses ${recognitionProvider.info.modelName} via ${recognitionProvider.info.providerLabel} to parse and explain image content.`,
+    description: buildDescription(baseDescription, parallelConfig),
     inputSchema: ImageRecognitionParamsSchema,
     callback: async (args: ImageRecognitionParams): Promise<CallToolResult> => {
       try {
@@ -21,7 +31,38 @@ export const createImageRecognitionTool = (recognitionProvider: RecognitionProvi
         
         // Default prompt if not provided
         const prompt = args.prompt || 'Describe this image';
-        const result = await recognitionProvider.recognize({ filepath: args.filepath, prompt, mediaKind: 'image' });
+        const request = { filepath: args.filepath, prompt, mediaKind: 'image' as const };
+
+        if (activeParallelDispatcher) {
+          const result = await activeParallelDispatcher.dispatch(request, recognitionProvider);
+
+          if (result.isError) {
+            log.error(`Error in image recognition: ${result.aggregatedText}`);
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: result.aggregatedText
+                }
+              ],
+              isError: true
+            };
+          }
+
+          log.info('Image recognition completed successfully');
+          log.verbose('Image recognition result', JSON.stringify(result));
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: result.aggregatedText
+              }
+            ]
+          };
+        }
+
+        const result = await recognitionProvider.recognize(request);
         
         if (result.isError) {
           log.error(`Error in image recognition: ${result.text}`);
@@ -64,3 +105,26 @@ export const createImageRecognitionTool = (recognitionProvider: RecognitionProvi
     }
   };
 };
+
+function resolveParallelDispatcher(
+  parallelConfig: ParallelInferenceConfig | undefined,
+  parallelDispatcher: ParallelDispatch | undefined
+): ParallelDispatch | undefined {
+  if (!isParallelDispatchEnabled(parallelConfig)) {
+    return undefined;
+  }
+
+  return parallelDispatcher ?? new ParallelDispatcher(parallelConfig);
+}
+
+function buildDescription(baseDescription: string, parallelConfig: ParallelInferenceConfig | undefined): string {
+  if (!isParallelDispatchEnabled(parallelConfig)) {
+    return baseDescription;
+  }
+
+  return `${baseDescription} This tool dispatches ${parallelConfig.promptCount} parallel prompt variants per call for improved recognition quality (aggregation: ${parallelConfig.aggregation}).`;
+}
+
+function isParallelDispatchEnabled(parallelConfig: ParallelInferenceConfig | undefined): parallelConfig is ParallelInferenceConfig {
+  return Boolean(parallelConfig?.enabled && parallelConfig.promptCount > 1);
+}

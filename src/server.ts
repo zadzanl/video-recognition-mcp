@@ -9,6 +9,7 @@ import { randomUUID } from 'crypto';
 import type { Request, Response } from 'express';
 import { createLogger } from './utils/logger.js';
 import { createRecognitionProvider } from './services/recognition-providers.js';
+import { ParallelDispatcher } from './services/parallel-dispatcher.js';
 import { createImageRecognitionTool } from './tools/image-recognition.js';
 import { createAudioRecognitionTool } from './tools/audio-recognition.js';
 import { createVideoRecognitionTool } from './tools/video-recognition.js';
@@ -50,9 +51,11 @@ export class Server {
    */
   private registerTools(): void {
     // Create tools
-    const imageRecognitionTool = createImageRecognitionTool(this.recognitionProvider);
-    const audioRecognitionTool = createAudioRecognitionTool(this.recognitionProvider);
-    const videoRecognitionTool = createVideoRecognitionTool(this.recognitionProvider);
+    const parallelConfig = this.config.recognition.parallelInference;
+    const parallelDispatcher = new ParallelDispatcher(parallelConfig);
+    const imageRecognitionTool = createImageRecognitionTool(this.recognitionProvider, parallelConfig, parallelDispatcher);
+    const audioRecognitionTool = createAudioRecognitionTool(this.recognitionProvider, parallelConfig, parallelDispatcher);
+    const videoRecognitionTool = createVideoRecognitionTool(this.recognitionProvider, parallelConfig, parallelDispatcher);
     
     // Register tools with MCP server
     this.mcpServer.tool(
