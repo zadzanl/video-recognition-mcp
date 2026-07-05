@@ -256,4 +256,23 @@ export class GeminiService {
 
     return { text: responseText };
   }
+
+  /**
+   * Generate text-only content with Gemini.
+   *
+   * Used internally by llm_merge aggregation so synthesis does not require a
+   * media upload or any MCP schema changes.
+   */
+  async processText(prompt: string, modelName: string): Promise<GeminiResponse> {
+    log.debug(`Processing text-only synthesis with model ${modelName}`);
+
+    const response = await this.client.models.generateContent({
+      model: modelName,
+      contents: createUserContent([prompt])
+    });
+
+    log.debug(`Received text-only synthesis response from Gemini API (model ${modelName})`);
+
+    return { text: response.text || '' };
+  }
 }

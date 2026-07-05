@@ -214,6 +214,130 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
       isError: true
     };
   }
+
+  async synthesizeText(prompt: string): Promise<RecognitionResult> {
+    // Defensive: empty modelNames is a configuration error.
+    if (!this.config.modelNames || this.config.modelNames.length === 0) {
+      log.error('Gemini configuration error: no model names configured for text synthesis');
+      return {
+        text: 'Gemini configuration error: no model names configured for text synthesis',
+        isError: true
+      };
+    }
+
+    const candidates = [...this.config.modelNames];
+    if (this.config.openRouterApiKey && this.config.openRouterModels) {
+      candidates.push(...this.config.openRouterModels);
+    }
+    if (this.config.mimoApiKey && this.config.mimoModels) {
+      candidates.push(...this.config.mimoModels);
+    }
+
+    const attempted: Array<{ model: string; reason: string }> = [];
+
+    while (true) {
+      const remainingCandidates = candidates.filter(c => !attempted.some(a => a.model === c));
+      if (remainingCandidates.length === 0) {
+        break;
+      }
+
+      let selectedModel: string;
+      try {
+        // Text synthesis is lightweight compared with media recognition. Use
+        // the existing scheduler with the smallest token estimate so synthesis
+        // still respects cooldowns and request caps without widening scheduler
+        // public types in this phase.
+        selectedModel = await this.scheduler.scheduleRequest(
+          remainingCandidates,
+          'image',
+          this.config.rateLimitMaxWaitMs ?? 30000
+        );
+      } catch (err) {
+        const timeoutMsg = err instanceof Error ? err.message : String(err);
+        log.error(`Text synthesis routing exhausted: ${timeoutMsg}`);
+        return {
+          text: `Text synthesis routing exhausted: ${timeoutMsg}. Attempted: ${attempted.map(a => `${a.model} (${a.reason})`).join(', ')}`,
+          isError: true
+        };
+      }
+
+      try {
+        if (this.config.modelNames.includes(selectedModel)) {
+          log.info(`Attempting Gemini text synthesis with model ${selectedModel}`);
+          return await this.geminiService.processText(prompt, selectedModel);
+        } else if (this.config.openRouterApiKey && this.config.openRouterModels?.includes(selectedModel)) {
+          log.info(`Attempting OpenRouter text synthesis with model ${selectedModel}`);
+          const openRouterConfig = {
+            provider: 'openai-compatible' as const,
+            providerLabel: 'OpenRouter',
+            modelName: selectedModel,
+            apiKey: this.config.openRouterApiKey,
+            baseUrl: 'https://openrouter.ai/api/v1',
+            maxInlineMediaBytes: DEFAULT_MAX_INLINE_MEDIA_BYTES,
+            parallelInference: this.config.parallelInference
+          };
+          const provider = new OpenAICompatibleRecognitionProvider(openRouterConfig);
+          const result = await provider.synthesizeText(prompt);
+          if (result.isError) {
+            const classification = classifyOpenAiError(result.text);
+            log.warn(`OpenRouter text synthesis model ${selectedModel} failed: ${classification.reason}`);
+            if (!classification.retryable) {
+              return result;
+            }
+            this.tracker.markCooldown(selectedModel);
+            attempted.push({ model: selectedModel, reason: classification.reason });
+            continue;
+          }
+          return result;
+        } else if (this.config.mimoApiKey && this.config.mimoModels?.includes(selectedModel)) {
+          log.info(`Attempting MiMo text synthesis with model ${selectedModel}`);
+          const mimoConfig = {
+            provider: 'openai-compatible' as const,
+            providerLabel: 'MiMo',
+            modelName: selectedModel,
+            apiKey: this.config.mimoApiKey,
+            baseUrl: this.config.mimoBaseUrl || 'https://api.xiaomimimo.com/v1',
+            maxInlineMediaBytes: DEFAULT_MAX_INLINE_MEDIA_BYTES,
+            parallelInference: this.config.parallelInference
+          };
+          const provider = new OpenAICompatibleRecognitionProvider(mimoConfig);
+          const result = await provider.synthesizeText(prompt);
+          if (result.isError) {
+            const classification = classifyOpenAiError(result.text);
+            log.warn(`MiMo text synthesis model ${selectedModel} failed: ${classification.reason}`);
+            if (!classification.retryable) {
+              return result;
+            }
+            this.tracker.markCooldown(selectedModel);
+            attempted.push({ model: selectedModel, reason: classification.reason });
+            continue;
+          }
+          return result;
+        } else {
+          throw new Error(`Unknown model in text synthesis routing chain: ${selectedModel}`);
+        }
+      } catch (error) {
+        const classification: ErrorClassification = classifyGeminiError(error);
+        log.warn(`Text synthesis model ${selectedModel} failed: ${classification.reason}`);
+
+        if (!classification.retryable) {
+          return {
+            text: `Gemini text synthesis failed: ${classification.reason}`,
+            isError: true
+          };
+        }
+
+        this.tracker.markCooldown(selectedModel);
+        attempted.push({ model: selectedModel, reason: classification.reason });
+      }
+    }
+
+    const modelList = attempted.map(a => `${a.model} (${a.reason})`).join(', ');
+    return {
+      text: `Gemini text synthesis fallback exhausted. Attempted models: ${modelList}`,
+      isError: true
+    };
+  }
 }
 
 interface OpenAICompatibleMessageContentPart {
@@ -306,6 +430,54 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
     } catch (error) {
       return {
         text: `Error processing file with ${this.info.providerLabel}: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true
+      };
+    }
+  }
+
+  async synthesizeText(prompt: string): Promise<RecognitionResult> {
+    try {
+      log.debug(`Sending text-only synthesis request to ${this.info.providerLabel} using model ${this.info.modelName}`);
+
+      const response = await fetch(this.chatCompletionsUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: this.config.modelName,
+          messages: [
+            {
+              role: 'user',
+              content: prompt
+            }
+          ]
+        })
+      });
+
+      const responseText = await response.text();
+      const parsed = this.parseJsonResponse(responseText);
+
+      if (!response.ok) {
+        return {
+          text: `${this.info.providerLabel} API error (${response.status} ${response.statusText}): ${this.extractErrorMessage(parsed, responseText)}`,
+          isError: true
+        };
+      }
+
+      const text = this.extractAssistantText(parsed);
+      if (!text) {
+        return {
+          text: `${this.info.providerLabel} returned an unsupported or empty text synthesis response shape`,
+          isError: true
+        };
+      }
+
+      return { text };
+    } catch (error) {
+      return {
+        text: `Error synthesizing text with ${this.info.providerLabel}: ${error instanceof Error ? error.message : String(error)}`,
         isError: true
       };
     }
