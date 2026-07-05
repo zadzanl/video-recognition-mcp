@@ -12,6 +12,7 @@ import { ThrottlingScheduler } from '../services/throttling-scheduler.js';
 import { classifyGeminiError } from '../services/gemini-error-classifier.js';
 import { GeminiRecognitionProvider } from '../services/recognition-providers.js';
 import type { GeminiFile, GeminiResponse, RecognitionRequest } from '../types/index.js';
+import { buildParallelInferenceConfig } from '../services/provider-config.js';
 
 let globalTestTmpDir: string;
 
@@ -211,7 +212,8 @@ describe('Cross-Provider Routing Integration', () => {
       apiKey: 'test-google-key',
       openRouterApiKey: 'test-openrouter-key',
       openRouterModels: ['google/gemini-2.5-flash'],
-      rateLimitMaxWaitMs: 500
+      rateLimitMaxWaitMs: 500,
+      parallelInference: buildParallelInferenceConfig({})
     };
 
     // We stub fetch to mock the OpenAI-compatible HTTP response from OpenRouter
@@ -246,6 +248,60 @@ describe('Cross-Provider Routing Integration', () => {
     }
   });
 
+  it('uses existing parallel inference config when routing to OpenRouter', async () => {
+    const mockService = {
+      uploadFile: async () => sampleFile,
+      processFile: async (): Promise<GeminiResponse> => {
+        throw Object.assign(new Error('Quota limit hit'), { name: 'ApiError', status: 429 });
+      }
+    };
+
+    const config = {
+      provider: 'gemini' as const,
+      providerLabel: 'Google Gemini',
+      modelName: 'gemini-3.5-flash + fallbacks',
+      modelNames: ['gemini-3.5-flash'],
+      apiKey: 'test-google-key',
+      openRouterApiKey: 'test-openrouter-key',
+      openRouterModels: ['google/gemini-2.5-flash'],
+      rateLimitMaxWaitMs: 500,
+      parallelInference: buildParallelInferenceConfig({ PARALLEL_PROMPTS: '2', PARALLEL_AGGREGATION: 'header_merge' })
+    };
+
+    const originalFetch = global.fetch;
+    const originalAggregation = process.env.PARALLEL_AGGREGATION;
+    process.env.PARALLEL_AGGREGATION = 'ALL_RETURN';
+    global.fetch = async (url, init): Promise<any> => {
+      if (typeof url === 'string' && url.includes('openrouter.ai')) {
+        const body = JSON.parse(init?.body as string);
+        assert.strictEqual(body.model, 'google/gemini-2.5-flash');
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            choices: [{ message: { content: 'Success despite invalid process env aggregation' } }]
+          })
+        };
+      }
+      return originalFetch(url, init);
+    };
+
+    try {
+      const provider = new GeminiRecognitionProvider(config, mockService as any);
+      const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
+
+      assert.strictEqual(result.isError, undefined);
+      assert.strictEqual(result.text, 'Success despite invalid process env aggregation');
+    } finally {
+      if (originalAggregation === undefined) {
+        delete process.env.PARALLEL_AGGREGATION;
+      } else {
+        process.env.PARALLEL_AGGREGATION = originalAggregation;
+      }
+      global.fetch = originalFetch;
+    }
+  });
+
   it('fails fast on authentication error without attempting OpenRouter', async () => {
     const processCalls: string[] = [];
     const mockService = {
@@ -265,7 +321,8 @@ describe('Cross-Provider Routing Integration', () => {
       apiKey: 'test-google-key',
       openRouterApiKey: 'test-openrouter-key',
       openRouterModels: ['google/gemini-2.5-flash'],
-      rateLimitMaxWaitMs: 500
+      rateLimitMaxWaitMs: 500,
+      parallelInference: buildParallelInferenceConfig({})
     };
 
     const originalFetch = global.fetch;

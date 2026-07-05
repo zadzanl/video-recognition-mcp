@@ -70,6 +70,51 @@ export interface RecognitionResult {
 export interface RecognitionProvider {
   readonly info: RecognitionProviderInfo;
   recognize(request: RecognitionRequest): Promise<RecognitionResult>;
+  /** Optional internal text-only synthesis path used by llm_merge aggregation. */
+  synthesizeText?(prompt: string): Promise<RecognitionResult>;
+}
+
+/**
+ * Parallel ensemble inference types
+ */
+export type ParallelAggregationMode = 'all_return' | 'header_merge' | 'llm_merge';
+
+export interface PromptTemplate {
+  name: string;
+  suffix: string;
+}
+
+export interface ParallelInferenceConfig {
+  enabled: boolean;
+  promptCount: number;
+  aggregation: ParallelAggregationMode;
+  promptTemplates: PromptTemplate[];
+  headerMergeTemplate: string;
+  llmMergePrompt: string;
+}
+
+export interface ParallelPromptVariant {
+  index: number;
+  prompt: string;
+  templateName: string;
+}
+
+export interface ParallelVariantResult {
+  index: number;
+  status: 'success' | 'failed';
+  templateName: string;
+  result?: RecognitionResult;
+  errorMessage?: string;
+}
+
+export interface ParallelDispatchResult {
+  aggregatedText: string;
+  variants: ParallelVariantResult[];
+  dispatchedCount: number;
+  succeededCount: number;
+  failedCount: number;
+  aggregation: ParallelAggregationMode;
+  isError?: boolean;
 }
 
 export interface GeminiRecognitionConfig extends RecognitionProviderInfo {
@@ -83,6 +128,7 @@ export interface GeminiRecognitionConfig extends RecognitionProviderInfo {
   mimoModels?: string[];
   mimoBaseUrl?: string;
   rateLimitMaxWaitMs?: number;
+  parallelInference: ParallelInferenceConfig;
 }
 
 export interface OpenAICompatibleRecognitionConfig extends RecognitionProviderInfo {
@@ -90,6 +136,7 @@ export interface OpenAICompatibleRecognitionConfig extends RecognitionProviderIn
   apiKey: string;
   baseUrl: string;
   maxInlineMediaBytes: number;
+  parallelInference: ParallelInferenceConfig;
 }
 
 export type ResolvedRecognitionConfig = GeminiRecognitionConfig | OpenAICompatibleRecognitionConfig;

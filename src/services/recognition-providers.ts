@@ -141,7 +141,8 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
             modelName: selectedModel,
             apiKey: this.config.openRouterApiKey,
             baseUrl: 'https://openrouter.ai/api/v1',
-            maxInlineMediaBytes: DEFAULT_MAX_INLINE_MEDIA_BYTES
+            maxInlineMediaBytes: DEFAULT_MAX_INLINE_MEDIA_BYTES,
+            parallelInference: this.config.parallelInference
           };
           const provider = new OpenAICompatibleRecognitionProvider(openRouterConfig);
           const result = await provider.recognize(request);
@@ -166,7 +167,8 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
             modelName: selectedModel,
             apiKey: this.config.mimoApiKey,
             baseUrl: this.config.mimoBaseUrl || 'https://api.xiaomimimo.com/v1',
-            maxInlineMediaBytes: DEFAULT_MAX_INLINE_MEDIA_BYTES
+            maxInlineMediaBytes: DEFAULT_MAX_INLINE_MEDIA_BYTES,
+            parallelInference: this.config.parallelInference
           };
           const provider = new OpenAICompatibleRecognitionProvider(mimoConfig);
           const result = await provider.recognize(request);

@@ -1,0 +1,38 @@
+{
+  "templates": [
+    {
+      "name": "Descriptive",
+      "suffix": " Provide a rich, detailed description of what you see and hear, focusing on key visual elements, colors, spatial relationships, and prominent audio features."
+    },
+    {
+      "name": "Enumerative",
+      "suffix": " List all distinct objects, people, events, sounds, or spoken phrases you can identify, including approximate counts and categories."
+    },
+    {
+      "name": "Temporal",
+      "suffix": " Describe the sequence of events chronologically, noting timestamps or relative order of occurrences, transitions, and changes over time."
+    },
+    {
+      "name": "Analytical",
+      "suffix": " Analyze the content critically: identify themes, evaluate quality or tone, assess context, and note any anomalies or noteworthy patterns."
+    },
+    {
+      "name": "Technical",
+      "suffix": " Focus on technical aspects: frame composition, camera movement, lighting conditions, audio quality, encoding artifacts, and production techniques."
+    },
+    {
+      "name": "Contextual",
+      "suffix": " Provide contextual interpretation: identify setting, cultural references, language(s) spoken, text visible, and any situational or background context."
+    },
+    {
+      "name": "Comparative",
+      "suffix": " Compare and contrast elements within the content: similarities, differences, before/after states, and relationships between subjects or events."
+    },
+    {
+      "name": "Focused",
+      "suffix": " Give a concise, high-signal summary prioritizing the most important information and omitting minor or redundant details."
+    }
+  ],
+  "headerMergeTemplate": "You are filling a Markdown report for one individual ensemble variant.\n\nUse only evidence from the media and the user's prompt. Do not use or refer to other variant outputs, do not synthesize across variants, and do not invent unsupported details. Fill every section below; do not delete or rename sections. If a section has no direct evidence, write \"Not observed\" or \"Unclear\" as appropriate. The dispatcher will later concatenate filled variant reports without synthesis.\n\n## Summary\n\n## Key observations\n\n## Temporal sequence\n\n## Uncertainties and alternatives\n",
+  "llmMergePrompt": "You are a synthesis assistant. You will receive multiple independent recognition outputs for the same media. Your task is to produce a single coherent response that:\n\n1. Deduplicates repeated facts.\n2. Reorganizes information logically without deleting configured sections.\n3. Preserves uncertainties and disagreements between agents explicitly.\n4. Avoids inventing any details not supported by the provided responses.\n5. Uses only the collected responses as evidence.\n\nReturn the synthesized result in Markdown format with all configured sections present. If a section lacks evidence, state \"No evidence provided.\""
+}

@@ -23,7 +23,7 @@ import type {
   RecognitionResult
 } from '../types/index.js';
 import { RateLimitTracker } from '../services/rate-limit-tracker.js';
-
+import { buildParallelInferenceConfig } from '../services/provider-config.js';
 // ---------------------------------------------------------------------------
 // classifyGeminiError — retryable / fallback-eligible
 // ---------------------------------------------------------------------------
@@ -257,7 +257,8 @@ function makeConfig(modelNames: string[]): GeminiRecognitionConfig {
     providerLabel: 'Google Gemini',
     modelName: modelNames.length === 1 ? modelNames[0] : `${modelNames[0]} + ${modelNames.length - 1} fallback`,
     modelNames,
-    apiKey: 'test-key'
+    apiKey: 'test-key',
+    parallelInference: buildParallelInferenceConfig({})
   };
 }
 
