@@ -9,6 +9,7 @@ import { ParallelDispatcher, sanitizeFailureReason } from '../services/parallel-
 import type {
   ParallelAggregationMode,
   ParallelInferenceConfig,
+  ProviderCallOptions,
   RecognitionProvider,
   RecognitionRequest,
   RecognitionResult
@@ -37,8 +38,8 @@ function makeConfig(overrides: Partial<ParallelInferenceConfig> = {}): ParallelI
 }
 
 function makeProvider(options: {
-  recognize?: (request: RecognitionRequest) => Promise<RecognitionResult>;
-  synthesizeText?: (prompt: string) => Promise<RecognitionResult>;
+  recognize?: (request: RecognitionRequest, options?: ProviderCallOptions) => Promise<RecognitionResult>;
+  synthesizeText?: (prompt: string, options?: ProviderCallOptions) => Promise<RecognitionResult>;
 }): RecognitionProvider {
   return {
     info: {
@@ -68,19 +69,50 @@ describe('ParallelDispatcher prompt generation', () => {
     assert.ok(first[2].prompt.includes('Focus on temporal order.'));
   });
 
+  it('retains prompt layout metadata while preserving flattened prompt text', () => {
+    const dispatcher = new ParallelDispatcher(makeConfig({ aggregation: 'all_return', promptCount: 3 }));
+    const variants = dispatcher.generateVariants(baseRequest.prompt, 3);
+
+    assert.deepStrictEqual(variants[0].promptLayout, {
+      stableTextPrefix: baseRequest.prompt,
+      variableTextSuffix: ''
+    });
+    assert.strictEqual(variants[0].prompt, baseRequest.prompt);
+
+    assert.strictEqual(variants[1].promptLayout.stableTextPrefix, baseRequest.prompt);
+    assert.strictEqual(variants[1].promptLayout.variableTextSuffix, 'Focus on visible objects.');
+    assert.strictEqual(variants[1].promptLayout.variableTextSuffix.includes(baseRequest.prompt), false);
+    assert.strictEqual(variants[1].prompt, `${baseRequest.prompt}\n\n${variants[1].promptLayout.variableTextSuffix}`);
+
+    assert.strictEqual(variants[2].promptLayout.stableTextPrefix, baseRequest.prompt);
+    assert.strictEqual(variants[2].promptLayout.variableTextSuffix, 'Focus on temporal order.');
+    assert.strictEqual(variants[2].prompt, `${baseRequest.prompt}\n\n${variants[2].promptLayout.variableTextSuffix}`);
+  });
+
   it('appends resolved per-variant header_merge fill instructions after prompt and suffix', () => {
     const dispatcher = new ParallelDispatcher(makeConfig({ aggregation: 'header_merge', promptCount: 2 }));
     const variants = dispatcher.generateVariants(baseRequest.prompt, 2);
+    const baselineSuffix = variants[0].promptLayout.variableTextSuffix ?? '';
+    const variantSuffix = variants[1].promptLayout.variableTextSuffix ?? '';
 
     assert.ok(variants[0].prompt.startsWith(baseRequest.prompt));
     assert.ok(variants[0].prompt.includes('You are Ensemble Agent 1 of 2 (Baseline).'));
     assert.ok(variants[0].prompt.includes('Agent 1/2 Baseline'));
     assert.strictEqual(variants[0].prompt.indexOf(baseRequest.prompt), 0);
+    assert.strictEqual(variants[0].promptLayout.stableTextPrefix, baseRequest.prompt);
+    assert.strictEqual(baselineSuffix.includes(baseRequest.prompt), false);
+    assert.ok(baselineSuffix.startsWith('You are Ensemble Agent 1 of 2 (Baseline).'));
+    assert.strictEqual(variants[0].prompt, `${baseRequest.prompt}\n\n${baselineSuffix}`);
 
     assert.ok(variants[1].prompt.startsWith(baseRequest.prompt));
     assert.ok(variants[1].prompt.indexOf('Focus on visible objects.') > baseRequest.prompt.length);
     assert.ok(variants[1].prompt.indexOf('You are Ensemble Agent 2 of 2 (CustomA).') > variants[1].prompt.indexOf('Focus on visible objects.'));
     assert.ok(variants[1].prompt.includes('Agent 2/2 CustomA'));
+    assert.strictEqual(variants[1].promptLayout.stableTextPrefix, baseRequest.prompt);
+    assert.strictEqual(variantSuffix.includes(baseRequest.prompt), false);
+    assert.ok(variantSuffix.startsWith('Focus on visible objects.'));
+    assert.ok(variantSuffix.includes('You are Ensemble Agent 2 of 2 (CustomA).'));
+    assert.strictEqual(variants[1].prompt, `${baseRequest.prompt}\n\n${variantSuffix}`);
   });
 });
 
@@ -88,8 +120,9 @@ describe('ParallelDispatcher dispatch and aggregation', () => {
   it('short-circuits to direct recognize when disabled', async () => {
     let calls = 0;
     const provider = makeProvider({
-      recognize: async request => {
+      recognize: async (request, options) => {
         calls++;
+        assert.strictEqual(options, undefined);
         assert.strictEqual(request.prompt, baseRequest.prompt);
         return { text: 'direct result' };
       },
@@ -111,8 +144,9 @@ describe('ParallelDispatcher dispatch and aggregation', () => {
   it('short-circuits to direct recognize when prompt count is one', async () => {
     let calls = 0;
     const provider = makeProvider({
-      recognize: async request => {
+      recognize: async (request, options) => {
         calls++;
+        assert.strictEqual(options, undefined);
         assert.strictEqual(request.prompt, baseRequest.prompt);
         return { text: 'single result' };
       }
@@ -125,6 +159,41 @@ describe('ParallelDispatcher dispatch and aggregation', () => {
     assert.strictEqual(result.aggregatedText, 'single result');
     assert.strictEqual(result.succeededCount, 1);
     assert.strictEqual(result.failedCount, 0);
+  });
+
+  it('passes one shared session id and stable instruction to sibling recognition calls', async () => {
+    const calls: Array<{ request: RecognitionRequest; options?: ProviderCallOptions }> = [];
+    const provider = makeProvider({
+      recognize: async (request, options) => {
+        calls.push({ request, options });
+        return { text: `recognized ${calls.length}` };
+      }
+    });
+    const dispatcher = new ParallelDispatcher(makeConfig({ aggregation: 'all_return', promptCount: 3 }));
+
+    await dispatcher.dispatch(baseRequest, provider);
+
+    assert.strictEqual(calls.length, 3);
+    const sessionId = calls[0].options?.sessionId ?? '';
+    assert.match(sessionId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    for (const call of calls) {
+      assert.strictEqual(call.options?.sessionId, sessionId);
+      assert.strictEqual(call.options?.stableInstruction, calls[0].options?.stableInstruction);
+      assert.deepStrictEqual(call.options?.promptLayout?.stableTextPrefix, baseRequest.prompt);
+    }
+
+    const stableInstruction = calls[0].options?.stableInstruction;
+    assert.strictEqual(stableInstruction?.role, 'system');
+    assert.ok(stableInstruction?.text.includes('media recognition assistant'));
+    assert.ok(stableInstruction?.text.includes('observable evidence'));
+    assert.ok(stableInstruction?.text.includes('preserve uncertainty'));
+    assert.ok(stableInstruction?.text.includes('avoid invented details'));
+    assert.strictEqual(stableInstruction?.text.includes(baseRequest.prompt), false);
+    assert.strictEqual(stableInstruction?.text.includes(baseRequest.filepath), false);
+    assert.strictEqual(stableInstruction?.text.includes('Focus on visible objects.'), false);
+    assert.strictEqual(stableInstruction?.text.includes('Focus on temporal order.'), false);
+    assert.strictEqual(stableInstruction?.text.includes('all_return'), false);
+    assert.strictEqual(stableInstruction?.text.includes('CustomA'), false);
   });
 
   it('aggregates all_return successful raw blocks in variant order', async () => {
@@ -219,10 +288,18 @@ describe('ParallelDispatcher dispatch and aggregation', () => {
 
   it('uses llm_merge synthesis prompt and returns synthesized text with metadata', async () => {
     let synthesisPrompt = '';
+    const recognitionOptions: ProviderCallOptions[] = [];
+    let synthesisOptions: ProviderCallOptions | undefined;
     const provider = makeProvider({
-      recognize: async request => ({ text: request.prompt.includes('Focus on visible objects.') ? 'agent two facts' : 'agent one facts' }),
-      synthesizeText: async prompt => {
+      recognize: async (request, options) => {
+        if (options) {
+          recognitionOptions.push(options);
+        }
+        return { text: request.prompt.includes('Focus on visible objects.') ? 'agent two facts' : 'agent one facts' };
+      },
+      synthesizeText: async (prompt, options) => {
         synthesisPrompt = prompt;
+        synthesisOptions = options;
         return { text: 'synthesized markdown' };
       }
     });
@@ -237,6 +314,10 @@ describe('ParallelDispatcher dispatch and aggregation', () => {
     assert.ok(synthesisPrompt.includes('agent two facts'));
     assert.ok(synthesisPrompt.includes('Deduplicate repeated facts'));
     assert.ok(synthesisPrompt.includes('do not add unsupported facts'));
+    const sessionId = recognitionOptions[0].sessionId;
+    assert.ok(sessionId);
+    assert.strictEqual(recognitionOptions.every(option => option.sessionId === sessionId), true);
+    assert.strictEqual(synthesisOptions?.sessionId, sessionId);
     assert.strictEqual(result.aggregatedText, 'synthesized markdown\n\n---\n\n_Parallel inference metadata: dispatched=2; succeeded=2; failed=0; aggregation=llm_merge._');
   });
 

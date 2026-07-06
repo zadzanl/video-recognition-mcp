@@ -64,16 +64,18 @@ export interface RecognitionRequest {
 
 export type OpenRouterResponseCacheConfig = boolean | undefined;
 
+export interface PromptLayoutMetadata {
+  stableTextPrefix: string;
+  variableTextSuffix?: string;
+}
+
 export interface ProviderCallOptions {
   sessionId?: string;
   stableInstruction?: {
     role: 'system' | 'developer';
     text: string;
   };
-  promptLayout?: {
-    stableTextPrefix: string;
-    variableTextSuffix?: string;
-  };
+  promptLayout?: PromptLayoutMetadata;
 }
 
 export interface RecognitionResult {
@@ -111,6 +113,7 @@ export interface ParallelPromptVariant {
   index: number;
   prompt: string;
   templateName: string;
+  promptLayout: PromptLayoutMetadata;
 }
 
 export interface ParallelVariantResult {

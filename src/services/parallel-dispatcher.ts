@@ -5,6 +5,7 @@
  * decide whether to route requests through parallel dispatch.
  */
 
+import * as crypto from 'node:crypto';
 import { BUILT_IN_PROMPT_TEMPLATES } from './provider-config.js';
 import type {
   ParallelDispatchResult,
@@ -19,6 +20,7 @@ import type {
 
 const HEADER_SEPARATOR = '\n\n---\n\n';
 const FAILURE_REASON_MAX_LENGTH = 240;
+const STABLE_RECOGNITION_INSTRUCTION = 'You are a media recognition assistant. Use observable evidence only, preserve uncertainty, and avoid invented details.';
 
 interface SuccessfulVariant extends ParallelVariantResult {
   status: 'success';
@@ -37,20 +39,28 @@ export class ParallelDispatcher {
       const index = i + 1;
       const suffixTemplate = i === 0 ? undefined : suffixTemplates[i - 1];
       const templateName = suffixTemplate?.name ?? 'Baseline';
-      let prompt = basePrompt;
+      let variableTextSuffix = '';
 
       if (suffixTemplate) {
-        prompt = appendPromptPart(prompt, suffixTemplate.suffix);
+        variableTextSuffix = appendPromptPart(variableTextSuffix, suffixTemplate.suffix);
       }
 
       if (this.config.aggregation === 'header_merge') {
-        prompt = appendPromptPart(
-          prompt,
+        variableTextSuffix = appendPromptPart(
+          variableTextSuffix,
           this.buildHeaderMergeInstruction({ index, count: safeCount, templateName })
         );
       }
 
-      variants.push({ index, prompt, templateName });
+      variants.push({
+        index,
+        prompt: appendPromptPart(basePrompt, variableTextSuffix),
+        templateName,
+        promptLayout: {
+          stableTextPrefix: basePrompt,
+          variableTextSuffix
+        }
+      });
     }
 
     return variants;
@@ -71,9 +81,21 @@ export class ParallelDispatcher {
       };
     }
 
+    const sessionId = crypto.randomUUID();
+    const stableInstruction = {
+      role: 'system' as const,
+      text: STABLE_RECOGNITION_INSTRUCTION
+    };
     const variants = this.generateVariants(request.prompt, this.config.promptCount);
     const settled = await Promise.allSettled(
-      variants.map(variant => provider.recognize({ ...request, prompt: variant.prompt }))
+      variants.map(variant => provider.recognize(
+        { ...request, prompt: variant.prompt },
+        {
+          sessionId,
+          stableInstruction,
+          promptLayout: variant.promptLayout
+        }
+      ))
     );
 
     const variantResults = settled.map((settledResult, i): ParallelVariantResult => {
@@ -105,7 +127,7 @@ export class ParallelDispatcher {
       };
     }
 
-    const aggregatedText = await this.aggregateSuccessfulResults(variantResults, provider, variants.length);
+    const aggregatedText = await this.aggregateSuccessfulResults(variantResults, provider, variants.length, sessionId);
 
     return {
       aggregatedText,
@@ -144,7 +166,8 @@ export class ParallelDispatcher {
   private async aggregateSuccessfulResults(
     variants: ParallelVariantResult[],
     provider: RecognitionProvider,
-    totalCount: number
+    totalCount: number,
+    sessionId?: string
   ): Promise<string> {
     switch (this.config.aggregation) {
       case 'all_return':
@@ -152,7 +175,7 @@ export class ParallelDispatcher {
       case 'header_merge':
         return this.aggregateHeaderMerge(variants, totalCount, 'header_merge');
       case 'llm_merge':
-        return this.aggregateLlmMerge(variants, provider, totalCount);
+        return this.aggregateLlmMerge(variants, provider, totalCount, sessionId);
     }
   }
 
@@ -190,7 +213,8 @@ export class ParallelDispatcher {
   private async aggregateLlmMerge(
     variants: ParallelVariantResult[],
     provider: RecognitionProvider,
-    totalCount: number
+    totalCount: number,
+    sessionId?: string
   ): Promise<string> {
     if (!provider.synthesizeText) {
       return this.aggregateHeaderMerge(
@@ -204,7 +228,7 @@ export class ParallelDispatcher {
     const synthesisPrompt = this.buildSynthesisPrompt(variants, totalCount);
 
     try {
-      const synthesisResult = await provider.synthesizeText(synthesisPrompt);
+      const synthesisResult = await provider.synthesizeText(synthesisPrompt, sessionId ? { sessionId } : undefined);
       if (synthesisResult.isError) {
         return this.aggregateHeaderMerge(
           variants,
