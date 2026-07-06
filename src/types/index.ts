@@ -62,6 +62,20 @@ export interface RecognitionRequest {
   mediaKind: MediaKind;
 }
 
+export type OpenRouterResponseCacheConfig = boolean | undefined;
+
+export interface ProviderCallOptions {
+  sessionId?: string;
+  stableInstruction?: {
+    role: 'system' | 'developer';
+    text: string;
+  };
+  promptLayout?: {
+    stableTextPrefix: string;
+    variableTextSuffix?: string;
+  };
+}
+
 export interface RecognitionResult {
   text: string;
   isError?: boolean;
@@ -69,9 +83,9 @@ export interface RecognitionResult {
 
 export interface RecognitionProvider {
   readonly info: RecognitionProviderInfo;
-  recognize(request: RecognitionRequest): Promise<RecognitionResult>;
+  recognize(request: RecognitionRequest, options?: ProviderCallOptions): Promise<RecognitionResult>;
   /** Optional internal text-only synthesis path used by llm_merge aggregation. */
-  synthesizeText?(prompt: string): Promise<RecognitionResult>;
+  synthesizeText?(prompt: string, options?: ProviderCallOptions): Promise<RecognitionResult>;
 }
 
 /**
@@ -124,6 +138,7 @@ export interface GeminiRecognitionConfig extends RecognitionProviderInfo {
   modelNames: string[];
   openRouterApiKey?: string;
   openRouterModels?: string[];
+  openRouterResponseCache?: OpenRouterResponseCacheConfig;
   mimoApiKey?: string;
   mimoModels?: string[];
   mimoBaseUrl?: string;
@@ -136,6 +151,7 @@ export interface OpenAICompatibleRecognitionConfig extends RecognitionProviderIn
   apiKey: string;
   baseUrl: string;
   maxInlineMediaBytes: number;
+  openRouterResponseCache?: OpenRouterResponseCacheConfig;
   parallelInference: ParallelInferenceConfig;
 }
 

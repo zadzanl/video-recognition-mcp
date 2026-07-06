@@ -2,7 +2,7 @@
  * Recognition provider configuration and safe provider resolution.
  */
 
-import type { ResolvedRecognitionConfig, RecognitionProviderName, ParallelInferenceConfig, PromptTemplate, ParallelAggregationMode } from '../types/index.js';
+import type { ResolvedRecognitionConfig, RecognitionProviderName, ParallelInferenceConfig, PromptTemplate, ParallelAggregationMode, OpenRouterResponseCacheConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import * as fs from 'node:fs';
 
@@ -109,6 +109,22 @@ function parseMaxInlineMediaBytes(rawValue: string | undefined): number {
   }
 
   return parsed;
+}
+
+export function parseOpenRouterResponseCache(raw: string | undefined): OpenRouterResponseCacheConfig {
+  if (raw === undefined || raw.trim() === '') {
+    return undefined;
+  }
+
+  const value = raw.trim();
+  if (value === 'true') {
+    return true;
+  }
+  if (value === 'false') {
+    return false;
+  }
+
+  throw new Error(`OPENROUTER_RESPONSE_CACHE must be exactly "true", "false", or unset/empty (received: "${raw}")`);
 }
 
 function requireValue(value: string | undefined, name: string, providerLabel: string): string {
@@ -378,6 +394,7 @@ export function loadRecognitionConfig(env: NodeJS.ProcessEnv = process.env): Res
       apiKey: requireValue(googleApiKey, 'GOOGLE_API_KEY', 'Gemini'),
       openRouterApiKey,
       openRouterModels,
+      openRouterResponseCache: parseOpenRouterResponseCache(env['OPENROUTER_RESPONSE_CACHE']),
       mimoApiKey,
       mimoModels,
       mimoBaseUrl,
@@ -393,6 +410,7 @@ export function loadRecognitionConfig(env: NodeJS.ProcessEnv = process.env): Res
     apiKey: requireValue(openAIKey, 'OPENAI_COMPATIBLE_API_KEY', 'The OpenAI-compatible provider'),
     baseUrl: requireValue(openAIBaseUrl, 'OPENAI_COMPATIBLE_BASE_URL', 'The OpenAI-compatible provider'),
     maxInlineMediaBytes,
+    openRouterResponseCache: parseOpenRouterResponseCache(env['OPENROUTER_RESPONSE_CACHE']),
     parallelInference: buildParallelInferenceConfig(env)
   };
 }

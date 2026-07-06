@@ -19,6 +19,7 @@ import {
   resolveGeminiModelNames,
   formatModelDisplayLabel,
   loadRecognitionConfig,
+  parseOpenRouterResponseCache,
   parseParallelPrompts,
   parseParallelAggregation,
   loadPromptTemplates,
@@ -222,6 +223,39 @@ describe('formatModelDisplayLabel', () => {
 });
 
 // ---------------------------------------------------------------------------
+// parseOpenRouterResponseCache
+// ---------------------------------------------------------------------------
+
+describe('parseOpenRouterResponseCache', () => {
+  it('returns undefined for undefined input', () => {
+    assert.strictEqual(parseOpenRouterResponseCache(undefined), undefined);
+  });
+
+  it('returns undefined for empty string', () => {
+    assert.strictEqual(parseOpenRouterResponseCache(''), undefined);
+  });
+
+  it('returns undefined for whitespace', () => {
+    assert.strictEqual(parseOpenRouterResponseCache('   '), undefined);
+  });
+
+  it('parses true', () => {
+    assert.strictEqual(parseOpenRouterResponseCache('true'), true);
+  });
+
+  it('parses false', () => {
+    assert.strictEqual(parseOpenRouterResponseCache('false'), false);
+  });
+
+  it('throws on invalid values', () => {
+    assert.throws(
+      () => parseOpenRouterResponseCache('yes'),
+      /OPENROUTER_RESPONSE_CACHE must be exactly "true", "false", or unset\/empty/
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // loadRecognitionConfig integration (config-level assertions)
 // ---------------------------------------------------------------------------
 
@@ -345,6 +379,40 @@ describe('loadRecognitionConfig OpenAI-compatible independence', () => {
     assert.strictEqual(config.provider, 'openai-compatible');
     assert.ok(!('modelNames' in config));
     assert.strictEqual(config.modelName, 'gpt-4o');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OpenRouter response cache config
+// ---------------------------------------------------------------------------
+
+describe('loadRecognitionConfig OpenRouter response cache', () => {
+  it('adds the parsed value to direct OpenAI-compatible config', () => {
+    const config = loadRecognitionConfig({
+      RECOGNITION_PROVIDER: 'openai-compatible',
+      OPENAI_COMPATIBLE_API_KEY: 'sk-test',
+      OPENAI_COMPATIBLE_BASE_URL: 'https://openrouter.ai/api/v1',
+      OPENAI_COMPATIBLE_MODEL: 'openai/gpt-4o-mini',
+      OPENROUTER_RESPONSE_CACHE: 'true'
+    });
+
+    assert.strictEqual(config.provider, 'openai-compatible');
+    if (config.provider === 'openai-compatible') {
+      assert.strictEqual(config.openRouterResponseCache, true);
+    }
+  });
+
+  it('adds the parsed value to Gemini config for fallback inheritance', () => {
+    const config = loadRecognitionConfig({
+      GOOGLE_API_KEY: 'test-key',
+      OPENROUTER_API_KEY: 'openrouter-test-key',
+      OPENROUTER_RESPONSE_CACHE: 'false'
+    });
+
+    assert.strictEqual(config.provider, 'gemini');
+    if (config.provider === 'gemini') {
+      assert.strictEqual(config.openRouterResponseCache, false);
+    }
   });
 });
 
