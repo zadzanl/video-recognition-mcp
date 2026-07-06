@@ -12,6 +12,7 @@ An MCP (Model Context Protocol) server that provides tools for image, audio, and
 - **Audio Recognition**: Analyze and transcribe audio using Google Gemini (.mp3, .wav, .ogg) or a configured OpenAI-compatible provider (.wav, .mp3)
 - **Video Recognition**: Analyze and describe videos using Google Gemini or a configured OpenAI-compatible provider
 - **Config-only provider/model selection**: MCP tools expose only `filepath` and `prompt`; provider and model are deployment configuration
+- **Optional parallel ensemble inference**: Fan out a recognition call into multiple prompt variants and aggregate the results via server-side configuration only
 
 ## Prerequisites
 
@@ -70,7 +71,9 @@ An MCP (Model Context Protocol) server that provides tools for image, audio, and
         "OPENAI_COMPATIBLE_API_KEY": "${input:openrouter-api-key}",
         "OPENAI_COMPATIBLE_BASE_URL": "https://openrouter.ai/api/v1",
         "OPENAI_COMPATIBLE_MODEL": "xiaomi/mimo-v2.5",
-        "OPENAI_COMPATIBLE_PROVIDER_LABEL": "OpenRouter"
+        "OPENAI_COMPATIBLE_PROVIDER_LABEL": "OpenRouter",
+        "PARALLEL_PROMPTS": "1",
+        "PARALLEL_AGGREGATION": "all_return"
       }
     }
   }
@@ -102,6 +105,8 @@ The server is configured using environment variables. Provider/model selection i
 | `MIMO_MODELS` | Optional comma-separated list of models to use on MiMo fallback (default: `mimo-v2.5`). |
 | `MIMO_BASE_URL` | Optional. Base URL for MiMo API (default: `https://api.xiaomimimo.com/v1`). |
 | `RATE_LIMIT_MAX_WAIT_MS` | Optional. Maximum time (in milliseconds) the throttling queue will sleep and wait for rate-limiting slots before returning a timeout (default: `30000`). |
+| `PARALLEL_PROMPTS` | Optional integer from `1` to `8`. Defaults to `1`; `1` disables parallel dispatch and preserves baseline single-call behavior. |
+| `PARALLEL_AGGREGATION` | Optional case-sensitive aggregation mode. Exact values: `all_return`, `header_merge`, `llm_merge`. Defaults to `all_return`. |
 
 Provider resolution is intentionally conservative:
 
@@ -151,6 +156,34 @@ To handle rate limits and transient availability issues under high concurrency (
 - **Cross-Provider Failover**: If all Google Gemini models fail or are cooling down, the server will route to OpenRouter models (if `OPENROUTER_API_KEY` is set), then MiMo models (if `MIMO_API_KEY` is set).
 - **Strict Error Isolation**: Only rate-limiting/quota errors (such as 429, resource exhausted, or rate-limit-induced billing/precondition issues) and transient server errors (500/503) trigger model or provider fallback. Real authentication failures (401), invalid arguments, malformed prompts, and file upload/processing failures fail fast immediately.
 - **API Key Secrecy**: No API keys or credentials are ever written to the persistent tracker state file, recorded in logs, or exposed in error messages.
+
+### Parallel Ensemble Inference
+
+Parallel ensemble inference is an optional server-side feature. MCP tool schemas stay unchanged and continue to expose only `filepath` and `prompt`; clients do not choose providers, models, prompt counts, or aggregation modes per call.
+
+Set `PARALLEL_PROMPTS` to an integer from `1` to `8`. The default is `1`, and `1` disables parallel dispatch so baseline behavior is preserved. Set `PARALLEL_AGGREGATION` to one of the exact, case-sensitive values `all_return`, `header_merge`, or `llm_merge`; the default is `all_return`.
+
+When `PARALLEL_PROMPTS > 1`, each tool description includes this sentence:
+
+`This tool dispatches {N} parallel prompt variants per call for improved recognition quality (aggregation: {mode}).`
+
+All variants use the same configured provider pipeline. The dispatcher does not intentionally fan out across different models or providers for diversity; existing Gemini scheduler/model fallback plus OpenRouter and MiMo recovery remains authoritative inside each variant. Plan quota accordingly: a tool call with `PARALLEL_PROMPTS=N` performs `N` recognition calls, and `llm_merge` may add one text-only synthesis call.
+
+Aggregation modes:
+
+- `all_return`: returns raw successful outputs as labeled blocks headed `## Ensemble Agent K of N (TemplateName)`, separated by `---`. There is no synthesis or deduplication.
+- `header_merge`: appends the configured Markdown `headerMergeTemplate` fill instruction to each variant prompt. The dispatcher concatenates the filled per-variant documents with ensemble headings and a compact metadata line; it does not make an extra synthesis call.
+- `llm_merge`: sends successful responses to the configured deterministic synthesis prompt. The synthesis prompt requires deduplication/reorganization only, no invented facts, no deleted sections, and preservation of uncertainties or disagreements. If synthesis fails, the dispatcher falls back to deterministic header-style aggregation and includes a compact synthesis-failure note.
+
+Prompt customization lives in `config/prompt-templates.json`. The file must be valid JSON with no comments and can contain:
+
+- `templates`: prompt variant objects with `name` and `suffix`
+- `headerMergeTemplate`: Markdown fill template for `header_merge`
+- `llmMergePrompt`: deterministic synthesis instructions for `llm_merge`
+
+If the file is missing or malformed, the server falls back to built-in defaults. Valid custom templates are used first, and any shortage is filled from built-in templates.
+
+Partial failures are handled after provider recovery is exhausted for each variant. If at least one variant succeeds, the tool response is not marked as an error and includes compact sanitized failure metadata. If every variant fails, the tool returns a tool error with sanitized failure reasons.
 
 ### Gemini Mode
 
@@ -299,7 +332,7 @@ The cache lives in process memory only — it is lost on server restart. OpenAI-
 | `dev` | `tsc -w & node --watch dist/index.js` | Watch mode: recompile and restart on changes. **Windows note:** the `&` may not work in cmd/PowerShell; use separate terminals or a tool like `concurrently`. |
 | `debug` | `tsc & npx @modelcontextprotocol/inspector node dist/index.js` | Build then launch the MCP Inspector GUI for interactive debugging. Same Windows `&` caveat. |
 | `lint` | `eslint src --ext .ts` | Lint TypeScript sources. **Note:** ESLint is not currently configured in this project (no ESLint dependency or config file). This script will fail until ESLint tooling is added. |
-| `test` | `echo "Error: no test specified"` | **No tests implemented.** Always exits with code 1. |
+| `test` | `tsc && node --test dist/tests/provider-config.test.js dist/tests/fallback.test.js dist/tests/routing.test.js dist/tests/parallel-dispatcher.test.js dist/tests/tool-parallel.test.js` | Compile TypeScript and run the unit/integration test suite. |
 
 ### Running in Development Mode
 

@@ -11,6 +11,8 @@
         "OPENAI_COMPATIBLE_BASE_URL": "https://openrouter.ai/api/v1",
         "OPENAI_COMPATIBLE_MODEL": "xiaomi/mimo-v2.5",
         "OPENAI_COMPATIBLE_PROVIDER_LABEL": "OpenRouter",
+        "PARALLEL_PROMPTS": "1",
+        "PARALLEL_AGGREGATION": "all_return",
         "LOG_LEVEL": "fatal"
       }
     }
