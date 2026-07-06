@@ -6,6 +6,7 @@ import { createLogger } from '../utils/logger.js';
 import type {
   GeminiRecognitionConfig,
   OpenAICompatibleRecognitionConfig,
+  ProviderCallOptions,
   RecognitionProvider,
   RecognitionRequest,
   RecognitionResult,
@@ -68,7 +69,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
     this.scheduler = new ThrottlingScheduler(this.tracker);
   }
 
-  async recognize(request: RecognitionRequest): Promise<RecognitionResult> {
+  async recognize(request: RecognitionRequest, options?: ProviderCallOptions): Promise<RecognitionResult> {
     // Defensive: empty modelNames is a configuration error.
     if (!this.config.modelNames || this.config.modelNames.length === 0) {
       log.error('Gemini configuration error: no model names configured');
@@ -142,10 +143,11 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
             apiKey: this.config.openRouterApiKey,
             baseUrl: 'https://openrouter.ai/api/v1',
             maxInlineMediaBytes: DEFAULT_MAX_INLINE_MEDIA_BYTES,
+            openRouterResponseCache: this.config.openRouterResponseCache,
             parallelInference: this.config.parallelInference
           };
           const provider = new OpenAICompatibleRecognitionProvider(openRouterConfig);
-          const result = await provider.recognize(request);
+          const result = await provider.recognize(request, options);
           if (result.isError) {
             const classification = classifyOpenAiError(result.text);
             log.warn(`OpenRouter model ${selectedModel} failed: ${classification.reason}`);
@@ -171,7 +173,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
             parallelInference: this.config.parallelInference
           };
           const provider = new OpenAICompatibleRecognitionProvider(mimoConfig);
-          const result = await provider.recognize(request);
+          const result = await provider.recognize(request, options);
           if (result.isError) {
             const classification = classifyOpenAiError(result.text);
             log.warn(`MiMo model ${selectedModel} failed: ${classification.reason}`);
@@ -215,7 +217,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
     };
   }
 
-  async synthesizeText(prompt: string): Promise<RecognitionResult> {
+  async synthesizeText(prompt: string, options?: ProviderCallOptions): Promise<RecognitionResult> {
     // Defensive: empty modelNames is a configuration error.
     if (!this.config.modelNames || this.config.modelNames.length === 0) {
       log.error('Gemini configuration error: no model names configured for text synthesis');
@@ -274,10 +276,11 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
             apiKey: this.config.openRouterApiKey,
             baseUrl: 'https://openrouter.ai/api/v1',
             maxInlineMediaBytes: DEFAULT_MAX_INLINE_MEDIA_BYTES,
+            openRouterResponseCache: this.config.openRouterResponseCache,
             parallelInference: this.config.parallelInference
           };
           const provider = new OpenAICompatibleRecognitionProvider(openRouterConfig);
-          const result = await provider.synthesizeText(prompt);
+          const result = await provider.synthesizeText(prompt, options);
           if (result.isError) {
             const classification = classifyOpenAiError(result.text);
             log.warn(`OpenRouter text synthesis model ${selectedModel} failed: ${classification.reason}`);
@@ -301,7 +304,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
             parallelInference: this.config.parallelInference
           };
           const provider = new OpenAICompatibleRecognitionProvider(mimoConfig);
-          const result = await provider.synthesizeText(prompt);
+          const result = await provider.synthesizeText(prompt, options);
           if (result.isError) {
             const classification = classifyOpenAiError(result.text);
             log.warn(`MiMo text synthesis model ${selectedModel} failed: ${classification.reason}`);
@@ -348,6 +351,17 @@ interface OpenAICompatibleMessageContentPart {
   input_audio?: { data: string; format: string };
 }
 
+interface OpenAICompatibleMessage {
+  role: 'system' | 'developer' | 'user';
+  content: string | OpenAICompatibleMessageContentPart[];
+}
+
+interface OpenAICompatibleRequestBody {
+  model: string;
+  messages: OpenAICompatibleMessage[];
+  session_id?: string;
+}
+
 interface OpenAICompatibleChatResponse {
   choices?: Array<{
     message?: {
@@ -372,7 +386,7 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
     this.chatCompletionsUrl = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
   }
 
-  async recognize(request: RecognitionRequest): Promise<RecognitionResult> {
+  async recognize(request: RecognitionRequest, options?: ProviderCallOptions): Promise<RecognitionResult> {
     try {
       const media = await validateMediaFile(this.info.providerLabel, this.info.provider, request.mediaKind, request.filepath);
 
@@ -388,24 +402,12 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
 
       log.debug(`Sending ${request.mediaKind} recognition request to ${this.info.providerLabel} using model ${this.info.modelName}`);
 
+      const messages = this.createRecognitionMessages(request, mediaPart, options);
+
       const response = await fetch(this.chatCompletionsUrl, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.config.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: this.config.modelName,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                { type: 'text', text: request.prompt },
-                mediaPart
-              ]
-            }
-          ]
-        })
+        headers: this.createRequestHeaders(),
+        body: JSON.stringify(this.createRequestBody(messages, options))
       });
 
       const responseText = await response.text();
@@ -435,25 +437,21 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
     }
   }
 
-  async synthesizeText(prompt: string): Promise<RecognitionResult> {
+  async synthesizeText(prompt: string, options?: ProviderCallOptions): Promise<RecognitionResult> {
     try {
       log.debug(`Sending text-only synthesis request to ${this.info.providerLabel} using model ${this.info.modelName}`);
 
+      const messages: OpenAICompatibleMessage[] = [
+        {
+          role: 'user',
+          content: prompt
+        }
+      ];
+
       const response = await fetch(this.chatCompletionsUrl, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.config.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: this.config.modelName,
-          messages: [
-            {
-              role: 'user',
-              content: prompt
-            }
-          ]
-        })
+        headers: this.createRequestHeaders(),
+        body: JSON.stringify(this.createRequestBody(messages, options))
       });
 
       const responseText = await response.text();
@@ -504,6 +502,88 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
     };
   }
 
+  private createRecognitionMessages(
+    request: RecognitionRequest,
+    mediaPart: OpenAICompatibleMessageContentPart,
+    options?: ProviderCallOptions
+  ): OpenAICompatibleMessage[] {
+    const messages: OpenAICompatibleMessage[] = [];
+
+    if (options?.stableInstruction) {
+      messages.push({
+        role: options.stableInstruction.role,
+        content: options.stableInstruction.text
+      });
+    }
+
+    messages.push({
+      role: 'user',
+      content: this.createRecognitionUserContent(request, mediaPart, options)
+    });
+
+    return messages;
+  }
+
+  private createRecognitionUserContent(
+    request: RecognitionRequest,
+    mediaPart: OpenAICompatibleMessageContentPart,
+    options?: ProviderCallOptions
+  ): OpenAICompatibleMessageContentPart[] {
+    if (!options?.promptLayout) {
+      return [
+        { type: 'text', text: request.prompt },
+        mediaPart
+      ];
+    }
+
+    const content: OpenAICompatibleMessageContentPart[] = [
+      { type: 'text', text: options.promptLayout.stableTextPrefix },
+      mediaPart
+    ];
+
+    const suffix = options.promptLayout.variableTextSuffix;
+    if (suffix) {
+      content.push({ type: 'text', text: suffix });
+    }
+
+    return content;
+  }
+
+  private createRequestBody(messages: OpenAICompatibleMessage[], options?: ProviderCallOptions): OpenAICompatibleRequestBody {
+    const body: OpenAICompatibleRequestBody = {
+      model: this.config.modelName,
+      messages
+    };
+
+    if (options?.sessionId !== undefined) {
+      body.session_id = options.sessionId;
+    }
+
+    return body;
+  }
+
+  private createRequestHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.config.apiKey}`,
+      'Content-Type': 'application/json'
+    };
+
+    const cacheHeader = this.openRouterResponseCacheHeader();
+    if (cacheHeader !== undefined) {
+      headers['X-OpenRouter-Cache'] = cacheHeader;
+    }
+
+    return headers;
+  }
+
+  private openRouterResponseCacheHeader(): string | undefined {
+    if (this.config.openRouterResponseCache === undefined || !isOpenRouterEndpoint(this.config.baseUrl)) {
+      return undefined;
+    }
+
+    return this.config.openRouterResponseCache ? 'true' : 'false';
+  }
+
   private parseJsonResponse(responseText: string): OpenAICompatibleChatResponse | undefined {
     try {
       return JSON.parse(responseText) as OpenAICompatibleChatResponse;
@@ -531,6 +611,15 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
   private extractErrorMessage(response: OpenAICompatibleChatResponse | undefined, responseText: string): string {
     const message = response?.error?.message || responseText;
     return message.length > 1000 ? `${message.slice(0, 1000)}...` : message;
+  }
+}
+
+function isOpenRouterEndpoint(baseUrl: string): boolean {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === 'openrouter.ai' || hostname.endsWith('.openrouter.ai');
+  } catch {
+    return false;
   }
 }
 

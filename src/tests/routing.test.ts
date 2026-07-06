@@ -11,7 +11,7 @@ import { RateLimitTracker } from '../services/rate-limit-tracker.js';
 import { ThrottlingScheduler } from '../services/throttling-scheduler.js';
 import { classifyGeminiError } from '../services/gemini-error-classifier.js';
 import { GeminiRecognitionProvider } from '../services/recognition-providers.js';
-import type { GeminiFile, GeminiResponse, RecognitionRequest } from '../types/index.js';
+import type { GeminiFile, GeminiResponse, ProviderCallOptions, RecognitionRequest } from '../types/index.js';
 import { buildParallelInferenceConfig } from '../services/provider-config.js';
 
 let globalTestTmpDir: string;
@@ -298,6 +298,140 @@ describe('Cross-Provider Routing Integration', () => {
       } else {
         process.env.PARALLEL_AGGREGATION = originalAggregation;
       }
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('forwards recognition options and OpenRouter cache config to OpenRouter fallback', async () => {
+    const mockService = {
+      uploadFile: async () => sampleFile,
+      processFile: async (): Promise<GeminiResponse> => {
+        throw Object.assign(new Error('Quota limit hit'), { name: 'ApiError', status: 429 });
+      }
+    };
+
+    const config = {
+      provider: 'gemini' as const,
+      providerLabel: 'Google Gemini',
+      modelName: 'gemini-3.5-flash + fallbacks',
+      modelNames: ['gemini-3.5-flash'],
+      apiKey: 'test-google-key',
+      openRouterApiKey: 'test-openrouter-key',
+      openRouterModels: ['google/gemini-2.5-flash'],
+      openRouterResponseCache: true,
+      rateLimitMaxWaitMs: 500,
+      parallelInference: buildParallelInferenceConfig({})
+    };
+
+    const options: ProviderCallOptions = {
+      sessionId: 'routing-session-1',
+      stableInstruction: {
+        role: 'system',
+        text: 'Use stable recognition routing rules.'
+      },
+      promptLayout: {
+        stableTextPrefix: 'Describe the routed image.',
+        variableTextSuffix: 'Focus on fallback metadata.'
+      }
+    };
+
+    const originalFetch = global.fetch;
+    let openRouterCalled = false;
+    global.fetch = async (url, init): Promise<any> => {
+      if (typeof url === 'string' && url.includes('openrouter.ai')) {
+        openRouterCalled = true;
+        const headers = init?.headers as Record<string, string>;
+        const body = JSON.parse(init?.body as string);
+        assert.strictEqual(headers['X-OpenRouter-Cache'], 'true');
+        assert.strictEqual(body.session_id, 'routing-session-1');
+        assert.deepStrictEqual(body.messages[0], {
+          role: 'system',
+          content: 'Use stable recognition routing rules.'
+        });
+        const content = body.messages[1].content as Array<any>;
+        assert.deepStrictEqual(content.map(part => part.type), ['text', 'image_url', 'text']);
+        assert.strictEqual(content[0].text, 'Describe the routed image.');
+        assert.strictEqual(content[2].text, 'Focus on fallback metadata.');
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            choices: [{ message: { content: 'Recognition fallback kept options.' } }]
+          })
+        };
+      }
+      return originalFetch(url, init);
+    };
+
+    try {
+      const provider = new GeminiRecognitionProvider(config, mockService as any);
+      const result = await provider.recognize({ ...baseRequest, filepath: testImagePath }, options);
+
+      assert.strictEqual(result.isError, undefined);
+      assert.strictEqual(result.text, 'Recognition fallback kept options.');
+      assert.strictEqual(openRouterCalled, true);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('forwards synthesis options and OpenRouter cache config to OpenRouter fallback', async () => {
+    const processTextCalls: string[] = [];
+    const mockService = {
+      processText: async (_prompt: string, model: string): Promise<GeminiResponse> => {
+        processTextCalls.push(model);
+        throw Object.assign(new Error('Quota limit hit'), { name: 'ApiError', status: 429 });
+      }
+    };
+
+    const config = {
+      provider: 'gemini' as const,
+      providerLabel: 'Google Gemini',
+      modelName: 'gemini-3.5-flash + fallbacks',
+      modelNames: ['gemini-3.5-flash'],
+      apiKey: 'test-google-key',
+      openRouterApiKey: 'test-openrouter-key',
+      openRouterModels: ['google/gemini-2.5-flash'],
+      openRouterResponseCache: false,
+      rateLimitMaxWaitMs: 500,
+      parallelInference: buildParallelInferenceConfig({})
+    };
+
+    const originalFetch = global.fetch;
+    let openRouterCalled = false;
+    global.fetch = async (url, init): Promise<any> => {
+      if (typeof url === 'string' && url.includes('openrouter.ai')) {
+        openRouterCalled = true;
+        const headers = init?.headers as Record<string, string>;
+        const body = JSON.parse(init?.body as string);
+        assert.strictEqual(headers['X-OpenRouter-Cache'], 'false');
+        assert.strictEqual(body.session_id, 'synthesis-session-1');
+        assert.deepStrictEqual(body.messages, [
+          {
+            role: 'user',
+            content: 'Synthesize routed fallback text.'
+          }
+        ]);
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            choices: [{ message: { content: 'Synthesis fallback kept options.' } }]
+          })
+        };
+      }
+      return originalFetch(url, init);
+    };
+
+    try {
+      const provider = new GeminiRecognitionProvider(config, mockService as any);
+      const result = await provider.synthesizeText('Synthesize routed fallback text.', { sessionId: 'synthesis-session-1' });
+
+      assert.strictEqual(result.isError, undefined);
+      assert.strictEqual(result.text, 'Synthesis fallback kept options.');
+      assert.deepStrictEqual(processTextCalls, ['gemini-3.5-flash']);
+      assert.strictEqual(openRouterCalled, true);
+    } finally {
       global.fetch = originalFetch;
     }
   });
