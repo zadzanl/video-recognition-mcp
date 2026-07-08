@@ -47,16 +47,31 @@ async function main(): Promise<void> {
     await server.start();
     
     // Handle process termination
-    process.on('SIGINT', async () => {
-      log.info('Received SIGINT signal, shutting down...');
-      await server.stop();
-      process.exit(0);
+    let shutdownInProgress = false;
+    const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
+      if (shutdownInProgress) {
+        log.info(`Received ${signal} signal while shutdown is already in progress`);
+        return;
+      }
+
+      shutdownInProgress = true;
+      log.info(`Received ${signal} signal, shutting down...`);
+
+      try {
+        await server.stop();
+        process.exit(0);
+      } catch (error) {
+        log.error('Error during shutdown', error);
+        process.exit(1);
+      }
+    };
+
+    process.on('SIGINT', () => {
+      void shutdown('SIGINT');
     });
     
-    process.on('SIGTERM', async () => {
-      log.info('Received SIGTERM signal, shutting down...');
-      await server.stop();
-      process.exit(0);
+    process.on('SIGTERM', () => {
+      void shutdown('SIGTERM');
     });
     
     log.info('Server started successfully');
