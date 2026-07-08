@@ -280,6 +280,34 @@ describe('OpenAI-compatible OpenRouter response cache header', () => {
   }
 });
 
+describe('OpenAI-compatible error sanitization', () => {
+  it('redacts bearer tokens, data URLs, and long payloads in returned errors', async () => {
+    const provider = makeProvider();
+    const originalFetch = global.fetch;
+
+    global.fetch = async (): Promise<Response> => new Response(
+      JSON.stringify({
+        error: {
+          message: 'Bearer sk-secret123 data:image/png;base64,AAAA ' + 'x'.repeat(500)
+        }
+      }),
+      { status: 500, statusText: 'Server Error' }
+    );
+
+    try {
+      const result = await provider.synthesizeText('Prompt that will fail.');
+
+      assert.strictEqual(result.isError, true);
+      assert.match(result.text, /Test OpenAI Compatible API error \(500 Server Error\)/);
+      assert.ok(result.text.includes('Bearer [redacted]') || result.text.includes('[redacted api key]'));
+      assert.ok(!result.text.includes('data:image/png;base64'));
+      assert.ok(result.text.length < 400);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+});
+
 function makeProvider(overrides: Partial<OpenAICompatibleRecognitionConfig> = {}): TestRecognitionProvider {
   const provider = createRecognitionProvider({
     provider: 'openai-compatible',

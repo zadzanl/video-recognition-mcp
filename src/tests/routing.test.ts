@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import { RateLimitTracker } from '../services/rate-limit-tracker.js';
 import { ThrottlingScheduler } from '../services/throttling-scheduler.js';
 import { classifyGeminiError } from '../services/gemini-error-classifier.js';
-import { GeminiRecognitionProvider } from '../services/recognition-providers.js';
+import { GeminiRecognitionProvider, classifyOpenAiError } from '../services/recognition-providers.js';
 import type { GeminiFile, GeminiResponse, ProviderCallOptions, RecognitionRequest } from '../types/index.js';
 import { buildParallelInferenceConfig } from '../services/provider-config.js';
 import type { GeminiService } from '../services/gemini.js';
@@ -204,6 +204,48 @@ describe('Strict Error Classification Update', () => {
   });
 });
 
+describe('OpenAI-compatible error classification', () => {
+  it('classifies retryable network-style errors', () => {
+    const retryableMessages = [
+      'fetch failed',
+      'TypeError: Failed to fetch',
+      'ETIMEDOUT while connecting',
+      'UND_ERR_CONNECT_TIMEOUT',
+      'read ECONNRESET',
+      'getaddrinfo EAI_AGAIN',
+      'connect ENOTFOUND',
+      'socket hang up ECONNREFUSED',
+      'request aborted',
+      'deadline exceeded'
+    ];
+
+    for (const message of retryableMessages) {
+      const c = classifyOpenAiError(message);
+      assert.strictEqual(c.retryable, true, message);
+    }
+  });
+
+  it('matches retryable and fail-fast HTTP codes by exact boundary only', () => {
+    assert.strictEqual(classifyOpenAiError('HTTP 429 too many requests').retryable, true);
+    assert.strictEqual(classifyOpenAiError('HTTP 500 internal error').retryable, true);
+    assert.strictEqual(classifyOpenAiError('HTTP 502 bad gateway').retryable, true);
+    assert.strictEqual(classifyOpenAiError('HTTP 503 unavailable').retryable, true);
+    assert.strictEqual(classifyOpenAiError('HTTP 504 gateway timeout').retryable, true);
+
+    assert.strictEqual(classifyOpenAiError('HTTP 400 bad request').retryable, false);
+    assert.strictEqual(classifyOpenAiError('HTTP 402 payment required').retryable, false);
+    assert.strictEqual(classifyOpenAiError('HTTP 401 unauthorized').retryable, false);
+    assert.strictEqual(classifyOpenAiError('HTTP 403 forbidden').retryable, false);
+    assert.strictEqual(classifyOpenAiError('error 1429 happened').retryable, false);
+  });
+
+  it('classifies fail-fast text for invalid requests and auth errors', () => {
+    assert.strictEqual(classifyOpenAiError('invalid request: unsupported media').retryable, false);
+    assert.strictEqual(classifyOpenAiError('permission denied by upstream').retryable, false);
+    assert.strictEqual(classifyOpenAiError('invalid api key provided').retryable, false);
+  });
+});
+
 describe('Cross-Provider Routing Integration', () => {
   const sampleFile: GeminiFile = {
     uri: 'gs://test-bucket/test-file',
@@ -277,6 +319,125 @@ describe('Cross-Provider Routing Integration', () => {
       assert.strictEqual(result.text, 'Success response from OpenRouter!');
       assert.deepStrictEqual(processCalls, ['gemini-3.5-flash']);
       assert.strictEqual(openRouterCalled, true);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('routes from OpenRouter to MiMo when OpenRouter fails retryably', async () => {
+    const processCalls: string[] = [];
+    const mockService = {
+      uploadFile: async () => sampleFile,
+      processFile: async (_f: GeminiFile, _prompt: string, model: string): Promise<GeminiResponse> => {
+        processCalls.push(model);
+        if (model === 'gemini-3.5-flash') {
+          throw Object.assign(new Error('Quota limit hit'), { name: 'ApiError', status: 429 });
+        }
+        return { text: `success from ${model}` };
+      }
+    };
+
+    const config = {
+      provider: 'gemini' as const,
+      providerLabel: 'Google Gemini',
+      modelName: 'gemini-3.5-flash + fallbacks',
+      modelNames: ['gemini-3.5-flash'],
+      apiKey: 'test-google-key',
+      openRouterApiKey: 'test-openrouter-key',
+      openRouterModels: ['google/gemini-2.5-flash'],
+      mimoApiKey: 'test-mimo-key',
+      mimoModels: ['mimo-v2.5'],
+      mimoBaseUrl: 'https://api.xiaomimimo.com/v1',
+      rateLimitMaxWaitMs: 500,
+      parallelInference: buildParallelInferenceConfig({})
+    };
+
+    const originalFetch = global.fetch;
+    const fetchCalls: string[] = [];
+    global.fetch = async (url, init): Promise<Response> => {
+      if (typeof url === 'string') {
+        fetchCalls.push(url);
+        if (url.includes('openrouter.ai')) {
+          const body = parseRequestBody(init);
+          assert.strictEqual(body.model, 'google/gemini-2.5-flash');
+          return chatCompletionResponse(JSON.stringify({ error: { message: 'fetch failed' } }), 503, 'Service Unavailable');
+        }
+        if (url.includes('xiaomimimo.com')) {
+          const body = parseRequestBody(init);
+          assert.strictEqual(body.model, 'mimo-v2.5');
+          return chatCompletionResponse('Success from MiMo');
+        }
+      }
+
+      return originalFetch(url, init);
+    };
+
+    try {
+      const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
+      const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
+
+      assert.strictEqual(result.isError, undefined);
+      assert.strictEqual(result.text, 'Success from MiMo');
+      assert.deepStrictEqual(processCalls, ['gemini-3.5-flash']);
+      assert.ok(fetchCalls.some(url => url.includes('openrouter.ai')));
+      assert.ok(fetchCalls.some(url => url.includes('xiaomimimo.com')));
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('fails fast on non-retryable OpenRouter errors without trying MiMo', async () => {
+    const processCalls: string[] = [];
+    const mockService = {
+      uploadFile: async () => sampleFile,
+      processFile: async (_f: GeminiFile, _prompt: string, model: string): Promise<GeminiResponse> => {
+        processCalls.push(model);
+        if (model === 'gemini-3.5-flash') {
+          throw Object.assign(new Error('Quota limit hit'), { name: 'ApiError', status: 429 });
+        }
+        return { text: `unexpected success from ${model}` };
+      }
+    };
+
+    const config = {
+      provider: 'gemini' as const,
+      providerLabel: 'Google Gemini',
+      modelName: 'gemini-3.5-flash + fallbacks',
+      modelNames: ['gemini-3.5-flash'],
+      apiKey: 'test-google-key',
+      openRouterApiKey: 'test-openrouter-key',
+      openRouterModels: ['google/gemini-2.5-flash'],
+      mimoApiKey: 'test-mimo-key',
+      mimoModels: ['mimo-v2.5'],
+      mimoBaseUrl: 'https://api.xiaomimimo.com/v1',
+      rateLimitMaxWaitMs: 500,
+      parallelInference: buildParallelInferenceConfig({})
+    };
+
+    const originalFetch = global.fetch;
+    let mimoCalled = false;
+    global.fetch = async (url, init): Promise<Response> => {
+      if (typeof url === 'string' && url.includes('openrouter.ai')) {
+        const body = parseRequestBody(init);
+        assert.strictEqual(body.model, 'google/gemini-2.5-flash');
+        return chatCompletionResponse(JSON.stringify({ error: { message: 'invalid request: unsupported media' } }), 400, 'Bad Request');
+      }
+      if (typeof url === 'string' && url.includes('xiaomimimo.com')) {
+        mimoCalled = true;
+      }
+
+      return originalFetch(url, init);
+    };
+
+    try {
+      const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
+      const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
+
+      assert.strictEqual(result.isError, true);
+      assert.ok(result.text.includes('OpenRouter'));
+      assert.ok(result.text.includes('invalid request'));
+      assert.deepStrictEqual(processCalls, ['gemini-3.5-flash']);
+      assert.strictEqual(mimoCalled, false);
     } finally {
       global.fetch = originalFetch;
     }
@@ -525,11 +686,13 @@ function expectContentPart<TType extends CapturedMessageContentPart['type']>(
   return part as Extract<CapturedMessageContentPart, { type: TType }>;
 }
 
-function chatCompletionResponse(content: string): Response {
+function chatCompletionResponse(content: string, status = 200, statusText = 'OK'): Response {
   return new Response(
-    JSON.stringify({
-      choices: [{ message: { content } }]
-    }),
-    { status: 200, statusText: 'OK' }
+    status >= 400
+      ? content
+      : JSON.stringify({
+          choices: [{ message: { content } }]
+        }),
+    { status, statusText }
   );
 }

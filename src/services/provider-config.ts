@@ -32,7 +32,6 @@ export function parseGeminiModelList(raw: string | undefined): string[] {
     .split(',')
     .map(s => s.trim())
     .filter(s => s.length > 0);
-
   if (models.length === 0) {
     throw new Error(
       'GEMINI_MODELS must contain at least one model ID (value was empty after trimming blanks and comma separators)'
@@ -111,6 +110,40 @@ function parseMaxInlineMediaBytes(rawValue: string | undefined): number {
   return parsed;
 }
 
+function parseRateLimitMaxWaitMs(rawValue: string | undefined): number {
+  if (rawValue === undefined || rawValue.trim() === '') {
+    return 30000;
+  }
+
+  const parsed = Number(rawValue);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`RATE_LIMIT_MAX_WAIT_MS must be a non-negative integer in milliseconds (received: "${rawValue}")`);
+  }
+
+  return parsed;
+}
+
+function parseMimoBaseUrl(rawValue: string | undefined): string {
+  if (rawValue === undefined || rawValue.trim() === '') {
+    return 'https://api.xiaomimimo.com/v1';
+  }
+
+  const value = rawValue.trim();
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`MIMO_BASE_URL must be a valid http or https URL (received: "${rawValue}")`);
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`MIMO_BASE_URL must be a valid http or https URL (received: "${rawValue}")`);
+  }
+
+  return value;
+}
+
 export function parseOpenRouterResponseCache(raw: string | undefined): OpenRouterResponseCacheConfig {
   if (raw === undefined || raw.trim() === '') {
     return undefined;
@@ -166,13 +199,6 @@ function parseModelList(raw: string | undefined, defaultList: string[]): string[
     }
   }
   return deduped;
-}
-
-function parseMaxWaitMs(raw: string | undefined): number {
-  if (!raw) return 30000;
-  const parsed = Number(raw);
-  if (isNaN(parsed) || parsed < 0) return 30000;
-  return parsed;
 }
 
 const logger = createLogger('ProviderConfig');
@@ -383,8 +409,8 @@ export function loadRecognitionConfig(env: NodeJS.ProcessEnv = process.env): Res
       readEnv(env, 'MIMO_MODELS'),
       ['mimo-v2.5']
     );
-    const mimoBaseUrl = readEnv(env, 'MIMO_BASE_URL') || 'https://api.xiaomimimo.com/v1';
-    const rateLimitMaxWaitMs = parseMaxWaitMs(readEnv(env, 'RATE_LIMIT_MAX_WAIT_MS'));
+    const mimoBaseUrl = parseMimoBaseUrl(readEnv(env, 'MIMO_BASE_URL'));
+    const rateLimitMaxWaitMs = parseRateLimitMaxWaitMs(readEnv(env, 'RATE_LIMIT_MAX_WAIT_MS'));
 
     return {
       provider: 'gemini',
@@ -394,7 +420,7 @@ export function loadRecognitionConfig(env: NodeJS.ProcessEnv = process.env): Res
       apiKey: requireValue(googleApiKey, 'GOOGLE_API_KEY', 'Gemini'),
       openRouterApiKey,
       openRouterModels,
-      openRouterResponseCache: parseOpenRouterResponseCache(env['OPENROUTER_RESPONSE_CACHE']),
+      openRouterResponseCache: parseOpenRouterResponseCache(readEnv(env, 'OPENROUTER_RESPONSE_CACHE')),
       mimoApiKey,
       mimoModels,
       mimoBaseUrl,
@@ -410,7 +436,7 @@ export function loadRecognitionConfig(env: NodeJS.ProcessEnv = process.env): Res
     apiKey: requireValue(openAIKey, 'OPENAI_COMPATIBLE_API_KEY', 'The OpenAI-compatible provider'),
     baseUrl: requireValue(openAIBaseUrl, 'OPENAI_COMPATIBLE_BASE_URL', 'The OpenAI-compatible provider'),
     maxInlineMediaBytes,
-    openRouterResponseCache: parseOpenRouterResponseCache(env['OPENROUTER_RESPONSE_CACHE']),
+    openRouterResponseCache: parseOpenRouterResponseCache(readEnv(env, 'OPENROUTER_RESPONSE_CACHE')),
     parallelInference: buildParallelInferenceConfig(env)
   };
 }

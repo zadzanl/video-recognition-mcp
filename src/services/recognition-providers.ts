@@ -23,31 +23,52 @@ import { DEFAULT_MAX_INLINE_MEDIA_BYTES } from './provider-config.js';
 
 const log = createLogger('RecognitionProviders');
 
-function classifyOpenAiError(message: string): { retryable: boolean; reason: string } {
+export function classifyOpenAiError(message: string): { retryable: boolean; reason: string } {
   const msg = message.toUpperCase();
-  if (/401|UNAUTHORIZED|INVALID API KEY|INVALID_API_KEY/i.test(msg)) {
+  const hasCode = (code: number): boolean => new RegExp(`(^|[^0-9])${code}([^0-9]|$)`).test(msg);
+
+  if (hasCode(401) || /UNAUTHORIZED|INVALID API KEY|INVALID_API_KEY/.test(msg)) {
     return { retryable: false, reason: 'unauthenticated' };
   }
-  if (/403|FORBIDDEN|PERMISSION_DENIED/i.test(msg)) {
+  if (hasCode(402)) {
+    return { retryable: false, reason: 'payment required' };
+  }
+  if (hasCode(403) || /FORBIDDEN|PERMISSION_DENIED|PERMISSION DENIED/.test(msg)) {
     return { retryable: false, reason: 'permission denied' };
   }
-  if (/400|INVALID_ARGUMENT|INVALID_REQUEST|MALFORMED|UNSUPPORTED/i.test(msg)) {
+  if (hasCode(400) || /INVALID_ARGUMENT|INVALID REQUEST|INVALID_REQUEST|MALFORMED|UNSUPPORTED MEDIA|UNSUPPORTED/.test(msg)) {
     return { retryable: false, reason: 'invalid request/argument' };
   }
-  if (/429|RATE LIMIT|TOO MANY REQUESTS|RESOURCE_EXHAUSTED/i.test(msg)) {
+  if (hasCode(429) || /RATE LIMIT|TOO MANY REQUESTS|RESOURCE_EXHAUSTED/.test(msg)) {
     return { retryable: true, reason: 'rate limited (429)' };
   }
-  if (/500|INTERNAL SERVER/i.test(msg)) {
+  if (hasCode(500) || /INTERNAL SERVER/.test(msg)) {
     return { retryable: true, reason: 'internal server error (500)' };
   }
-  if (/503|SERVICE UNAVAILABLE/i.test(msg)) {
-    return { retryable: true, reason: 'service unavailable (503)' };
+  if (hasCode(502) || hasCode(503) || hasCode(504) || /BAD GATEWAY|SERVICE UNAVAILABLE|GATEWAY TIMEOUT/.test(msg)) {
+    return { retryable: true, reason: 'transient upstream error' };
   }
-  if (/TIMEOUT|DEADLINE_EXCEEDED|ABORTED|ETIMEDOUT|ECONNRESET/i.test(msg)) {
-    return { retryable: true, reason: 'timeout or connection reset' };
+  if (/TIMEOUT|DEADLINE[_ ]EXCEEDED|ABORTED|ABORT_ERR|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|FETCH FAILED|FAILED TO FETCH|UND_ERR/.test(msg)) {
+    return { retryable: true, reason: 'transient network failure' };
   }
   // Safe default for general errors is fail-fast
-  return { retryable: false, reason: message };
+  return { retryable: false, reason: sanitizeOpenAiErrorText(message) };
+}
+
+function sanitizeOpenAiErrorText(text: string): string {
+  const compact = text
+    .replace(/Bearer\s+[A-Za-z0-9._+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/sk-[A-Za-z0-9._-]{8,}/gi, '[redacted api key]')
+    .replace(/"api[_-]?key"\s*:\s*"[^"]*"/gi, '"api_key":"[redacted]"')
+    .replace(/data:[^\s"']+/gi, 'data:[redacted]')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (compact.length <= 240) {
+    return compact;
+  }
+
+  return `${compact.slice(0, 240)}...`;
 }
 
 export class GeminiRecognitionProvider implements RecognitionProvider {
@@ -416,7 +437,7 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
 
       if (!response.ok) {
         return {
-          text: `${this.info.providerLabel} API error (${response.status} ${response.statusText}): ${this.extractErrorMessage(parsed, responseText)}`,
+          text: `${this.info.providerLabel} API error (${response.status} ${response.statusText}): ${sanitizeOpenAiErrorText(this.extractErrorMessage(parsed, responseText))}`,
           isError: true
         };
       }
@@ -432,7 +453,7 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
       return { text };
     } catch (error) {
       return {
-        text: `Error processing file with ${this.info.providerLabel}: ${error instanceof Error ? error.message : String(error)}`,
+        text: `Error processing file with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
         isError: true
       };
     }
@@ -460,7 +481,7 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
 
       if (!response.ok) {
         return {
-          text: `${this.info.providerLabel} API error (${response.status} ${response.statusText}): ${this.extractErrorMessage(parsed, responseText)}`,
+          text: `${this.info.providerLabel} API error (${response.status} ${response.statusText}): ${sanitizeOpenAiErrorText(this.extractErrorMessage(parsed, responseText))}`,
           isError: true
         };
       }
@@ -476,7 +497,7 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
       return { text };
     } catch (error) {
       return {
-        text: `Error synthesizing text with ${this.info.providerLabel}: ${error instanceof Error ? error.message : String(error)}`,
+        text: `Error synthesizing text with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
         isError: true
       };
     }

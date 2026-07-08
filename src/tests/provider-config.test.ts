@@ -347,6 +347,38 @@ describe('loadRecognitionConfig Gemini model fallback', () => {
       /Ambiguous Gemini model configuration/
     );
   });
+
+  it('throws when RATE_LIMIT_MAX_WAIT_MS is invalid', () => {
+    assert.throws(
+      () => loadRecognitionConfig({
+        GOOGLE_API_KEY: 'test-key',
+        RATE_LIMIT_MAX_WAIT_MS: 'not-a-number'
+      }),
+      /RATE_LIMIT_MAX_WAIT_MS must be a non-negative integer in milliseconds/
+    );
+  });
+
+  it('throws when MIMO_BASE_URL is invalid', () => {
+    assert.throws(
+      () => loadRecognitionConfig({
+        GOOGLE_API_KEY: 'test-key',
+        MIMO_BASE_URL: 'ftp://example.com/v1'
+      }),
+      /MIMO_BASE_URL must be a valid http or https URL/
+    );
+  });
+
+  it('trims whitespace from MIMO_BASE_URL when provided', () => {
+    const config = loadRecognitionConfig({
+      GOOGLE_API_KEY: 'test-key',
+      MIMO_BASE_URL: '  https://api.example.test/v1  '
+    });
+
+    assert.strictEqual(config.provider, 'gemini');
+    if (config.provider === 'gemini') {
+      assert.strictEqual(config.mimoBaseUrl, 'https://api.example.test/v1');
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -412,6 +444,21 @@ describe('loadRecognitionConfig OpenRouter response cache', () => {
     assert.strictEqual(config.provider, 'gemini');
     if (config.provider === 'gemini') {
       assert.strictEqual(config.openRouterResponseCache, false);
+    }
+  });
+
+  it('treats whitespace OPENROUTER_RESPONSE_CACHE as unset in loadRecognitionConfig', () => {
+    const config = loadRecognitionConfig({
+      RECOGNITION_PROVIDER: 'openai-compatible',
+      OPENAI_COMPATIBLE_API_KEY: 'sk-test',
+      OPENAI_COMPATIBLE_BASE_URL: 'https://api.example.com/v1',
+      OPENAI_COMPATIBLE_MODEL: 'gpt-4o-mini',
+      OPENROUTER_RESPONSE_CACHE: '   '
+    });
+
+    assert.strictEqual(config.provider, 'openai-compatible');
+    if (config.provider === 'openai-compatible') {
+      assert.strictEqual(config.openRouterResponseCache, undefined);
     }
   });
 });
