@@ -5,10 +5,18 @@
 import { createLogger } from '../utils/logger.js';
 import { AudioRecognitionParamsSchema } from '../types/index.js';
 import { ParallelDispatcher } from '../services/parallel-dispatcher.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { AudioRecognitionParams, ParallelInferenceConfig, RecognitionProvider, ToolDefinition } from '../types/index.js';
 
 const log = createLogger('AudioRecognitionTool');
+
+const TOOL_ANNOTATIONS: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  openWorldHint: true
+};
+
+// openWorldHint is true because each call can upload or encode local media and send it to an external provider.
 
 type ParallelDispatch = Pick<ParallelDispatcher, 'dispatch'>;
 
@@ -17,12 +25,14 @@ export const createAudioRecognitionTool = (
   parallelConfig?: ParallelInferenceConfig,
   parallelDispatcher?: ParallelDispatch
 ): ToolDefinition<typeof AudioRecognitionParamsSchema> => {
-  const baseDescription = `Analyze and transcribe audio. This tool uses ${recognitionProvider.info.modelName} via ${recognitionProvider.info.providerLabel} to parse and explain audio content.`;
+  const baseDescription = `Analyze and transcribe audio from a local file path using ${recognitionProvider.info.modelName} via ${recognitionProvider.info.providerLabel}. Configure provider credentials in the environment before starting the server. Media can be uploaded or encoded and sent to the external provider endpoint, so latency and provider rate limits can apply. The tool returns plain text, and failures are returned as tool errors. Supported audio formats depend on the active provider and model, with common support for WAV, MP3, and OGG.`;
   const activeParallelDispatcher = resolveParallelDispatcher(parallelConfig, parallelDispatcher);
 
   return {
     name: 'audio_recognition',
+    title: 'Audio recognition',
     description: buildDescription(baseDescription, parallelConfig),
+    annotations: TOOL_ANNOTATIONS,
     inputSchema: AudioRecognitionParamsSchema,
     callback: async (args: AudioRecognitionParams): Promise<CallToolResult> => {
       try {

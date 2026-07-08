@@ -10,6 +10,11 @@ import { createVideoRecognitionTool } from '../tools/video-recognition.js';
 import type { ParallelDispatchResult, ParallelInferenceConfig, RecognitionProvider, RecognitionRequest, RecognitionResult } from '../types/index.js';
 
 const parallelSentence = 'This tool dispatches 3 parallel prompt variants per call for improved recognition quality (aggregation: header_merge).';
+const expectedAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  openWorldHint: true
+} as const;
 
 type RecognitionToolDefinition =
   | ReturnType<typeof createImageRecognitionTool>
@@ -20,6 +25,7 @@ interface ToolCase {
   label: string;
   mediaKind: RecognitionRequest['mediaKind'];
   defaultPrompt: string;
+  expectedTitle: string;
   expectedBaseDescription: string;
   createTool: (provider: RecognitionProvider, config?: ParallelInferenceConfig, dispatcher?: FakeDispatcher) => RecognitionToolDefinition;
 }
@@ -33,21 +39,24 @@ const toolCases: ToolCase[] = [
     label: 'image',
     mediaKind: 'image',
     defaultPrompt: 'Describe this image',
-    expectedBaseDescription: 'Analyze and describe images. This tool uses test-model via Test Provider to parse and explain image content.',
+    expectedTitle: 'Image recognition',
+    expectedBaseDescription: 'Analyze and describe images from a local file path using test-model via Test Provider. Configure provider credentials in the environment before starting the server. Media can be uploaded or encoded and sent to the external provider endpoint, so latency and provider rate limits can apply. The tool returns plain text, and failures are returned as tool errors. Supported image formats depend on the active provider and model, with common support for JPG, JPEG, PNG, and WEBP.',
     createTool: createImageRecognitionTool
   },
   {
     label: 'audio',
     mediaKind: 'audio',
     defaultPrompt: 'Describe this audio',
-    expectedBaseDescription: 'Analyze and transcribe audio. This tool uses test-model via Test Provider to parse and explain audio content.',
+    expectedTitle: 'Audio recognition',
+    expectedBaseDescription: 'Analyze and transcribe audio from a local file path using test-model via Test Provider. Configure provider credentials in the environment before starting the server. Media can be uploaded or encoded and sent to the external provider endpoint, so latency and provider rate limits can apply. The tool returns plain text, and failures are returned as tool errors. Supported audio formats depend on the active provider and model, with common support for WAV, MP3, and OGG.',
     createTool: createAudioRecognitionTool
   },
   {
     label: 'video',
     mediaKind: 'video',
     defaultPrompt: 'Describe this video',
-    expectedBaseDescription: 'Analyze and describe videos. This tool uses test-model via Test Provider to parse and explain video content.',
+    expectedTitle: 'Video recognition',
+    expectedBaseDescription: 'Analyze and describe videos from a local file path using test-model via Test Provider. Configure provider credentials in the environment before starting the server. Media can be uploaded or encoded and sent to the external provider endpoint, so latency and provider rate limits can apply. The tool returns plain text, and failures are returned as tool errors. Supported video formats depend on the active provider and model, with common support for MP4, MOV, WEBM, AVI, and MPEG.',
     createTool: createVideoRecognitionTool
   }
 ];
@@ -76,8 +85,10 @@ describe('recognition tool parallel integration', () => {
       const tool = toolCase.createTool(provider, makeConfig({ enabled: false, promptCount: 3 }), dispatcher);
       const result = await tool.callback({ filepath: `${toolCase.label}.fixture`, prompt: 'Describe this fixture' });
 
+      assert.strictEqual(tool.title, toolCase.expectedTitle);
       assert.strictEqual(tool.description, toolCase.expectedBaseDescription);
       assert.strictEqual(tool.description.includes('parallel prompt variants'), false);
+      assert.deepStrictEqual(tool.annotations, expectedAnnotations);
       assert.deepStrictEqual(Object.keys(tool.inputSchema.shape).sort(), ['filepath', 'prompt']);
       assert.strictEqual(providerCalls, 1);
       assert.strictEqual(dispatcherCalls, 0);
@@ -104,7 +115,9 @@ describe('recognition tool parallel integration', () => {
       const tool = toolCase.createTool(provider, makeConfig({ enabled: true, promptCount: 1 }), dispatcher);
       const result = await tool.callback({ filepath: `${toolCase.label}.fixture` });
 
+      assert.strictEqual(tool.title, toolCase.expectedTitle);
       assert.strictEqual(tool.description, toolCase.expectedBaseDescription);
+      assert.deepStrictEqual(tool.annotations, expectedAnnotations);
       assert.strictEqual(providerCalls, 1);
       assert.strictEqual(dispatcherCalls, 0);
       assert.deepStrictEqual(result.content, [{ type: 'text', text: `${toolCase.label} single prompt result` }]);
@@ -134,6 +147,8 @@ describe('recognition tool parallel integration', () => {
       const tool = toolCase.createTool(provider, makeConfig(), dispatcher);
       const result = await tool.callback({ filepath: `${toolCase.label}.fixture`, prompt: 'Prompt for aggregation' });
 
+      assert.strictEqual(tool.title, toolCase.expectedTitle);
+      assert.deepStrictEqual(tool.annotations, expectedAnnotations);
       assert.strictEqual(providerCalls, 0);
       assert.strictEqual(dispatcherCalls, 1);
       assert.deepStrictEqual(result.content, [{ type: 'text', text: `${toolCase.label} aggregated result` }]);
@@ -149,6 +164,8 @@ describe('recognition tool parallel integration', () => {
       const tool = toolCase.createTool(provider, makeConfig(), dispatcher);
       const result = await tool.callback({ filepath: `${toolCase.label}.fixture`, prompt: 'Prompt' });
 
+      assert.strictEqual(tool.title, toolCase.expectedTitle);
+      assert.deepStrictEqual(tool.annotations, expectedAnnotations);
       assert.deepStrictEqual(result.content, [{ type: 'text', text: `${toolCase.label} aggregate failure` }]);
       assert.strictEqual(result.isError, true);
     });
@@ -167,6 +184,8 @@ describe('recognition tool parallel integration', () => {
       const tool = toolCase.createTool(provider, makeConfig(), dispatcher);
       const result = await tool.callback({ filepath: `${toolCase.label}.fixture`, prompt: 'Prompt' });
 
+      assert.strictEqual(tool.title, toolCase.expectedTitle);
+      assert.deepStrictEqual(tool.annotations, expectedAnnotations);
       assert.deepStrictEqual(result.content, [{ type: 'text', text: `${toolCase.label} partial aggregate` }]);
       assert.strictEqual(result.isError, undefined);
     });
@@ -175,8 +194,10 @@ describe('recognition tool parallel integration', () => {
       const provider = makeProvider();
       const tool = toolCase.createTool(provider, makeConfig());
 
+      assert.strictEqual(tool.title, toolCase.expectedTitle);
       assert.strictEqual(tool.description, `${toolCase.expectedBaseDescription} ${parallelSentence}`);
       assert.strictEqual(countOccurrences(tool.description, parallelSentence), 1);
+      assert.deepStrictEqual(tool.annotations, expectedAnnotations);
       assert.deepStrictEqual(Object.keys(tool.inputSchema.shape).sort(), ['filepath', 'prompt']);
     });
   }

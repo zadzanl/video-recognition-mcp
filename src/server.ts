@@ -84,24 +84,36 @@ export class Server {
     const videoRecognitionTool = createVideoRecognitionTool(this.recognitionProvider, parallelConfig, parallelDispatcher);
     
     // Register tools with MCP server
-    mcpServer.tool(
+    mcpServer.registerTool(
       imageRecognitionTool.name,
-      imageRecognitionTool.description,
-      imageRecognitionTool.inputSchema.shape,
+      {
+        title: imageRecognitionTool.title,
+        description: imageRecognitionTool.description,
+        inputSchema: imageRecognitionTool.inputSchema,
+        annotations: imageRecognitionTool.annotations
+      },
       imageRecognitionTool.callback
     );
     
-    mcpServer.tool(
+    mcpServer.registerTool(
       audioRecognitionTool.name,
-      audioRecognitionTool.description,
-      audioRecognitionTool.inputSchema.shape,
+      {
+        title: audioRecognitionTool.title,
+        description: audioRecognitionTool.description,
+        inputSchema: audioRecognitionTool.inputSchema,
+        annotations: audioRecognitionTool.annotations
+      },
       audioRecognitionTool.callback
     );
     
-    mcpServer.tool(
+    mcpServer.registerTool(
       videoRecognitionTool.name,
-      videoRecognitionTool.description,
-      videoRecognitionTool.inputSchema.shape,
+      {
+        title: videoRecognitionTool.title,
+        description: videoRecognitionTool.description,
+        inputSchema: videoRecognitionTool.inputSchema,
+        annotations: videoRecognitionTool.annotations
+      },
       videoRecognitionTool.callback
     );
     

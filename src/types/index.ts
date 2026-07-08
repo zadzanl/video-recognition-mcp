@@ -3,14 +3,14 @@
  */
 
 import { z } from 'zod';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 
 /**
  * Common parameters for all recognition tools
  */
 export const RecognitionParamsSchema = z.object({
-  filepath: z.string().describe('Path to the media file to analyze'),
-  prompt: z.string().default('Describe this content').describe('Custom prompt for the recognition')
+  filepath: z.string().describe('Local path to the media file to analyze. The server reads this file and sends it to the configured provider.'),
+  prompt: z.string().default('Describe this content').describe('Optional custom prompt to guide recognition. Defaults to "Describe this content".')
 });
 
 export type RecognitionParams = z.input<typeof RecognitionParamsSchema>;
@@ -38,7 +38,9 @@ export type AudioRecognitionParams = z.input<typeof AudioRecognitionParamsSchema
  */
 export interface ToolDefinition<TInputSchema extends z.AnyZodObject = typeof RecognitionParamsSchema> {
   name: string;
+  title?: string;
   description: string;
+  annotations?: ToolAnnotations;
   inputSchema: TInputSchema;
   callback: (args: z.input<TInputSchema>) => Promise<CallToolResult>;
 }

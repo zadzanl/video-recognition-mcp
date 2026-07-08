@@ -25,7 +25,16 @@ interface JsonRpcResponse {
 }
 
 interface ToolListResult {
-  tools?: { name?: string }[];
+  tools?: {
+    name?: string;
+    title?: string;
+    description?: string;
+    annotations?: {
+      readOnlyHint?: boolean;
+      destructiveHint?: boolean;
+      openWorldHint?: boolean;
+    };
+  }[];
 }
 
 describe('Server Streamable HTTP transport', () => {
@@ -56,6 +65,15 @@ describe('Server Streamable HTTP transport', () => {
         result.tools.map(tool => tool.name).sort(),
         ['audio_recognition', 'image_recognition', 'video_recognition']
       );
+
+      const imageTool = result.tools.find(tool => tool.name === 'image_recognition');
+      assert.ok(imageTool);
+      assert.strictEqual(imageTool?.title, 'Image recognition');
+      assert.deepStrictEqual(imageTool?.annotations, {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: true
+      });
 
       await server.stop();
       await assert.rejects(fetch(`${baseUrl}/mcp`, {
