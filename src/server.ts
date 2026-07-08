@@ -30,6 +30,8 @@ export interface ServerConfig {
   recognition: ResolvedRecognitionConfig;
   transport: 'stdio' | 'sse';
   port?: number;
+  host?: string;
+  authToken?: string;
   maxHttpSessions?: number;
 }
 
@@ -154,8 +156,30 @@ export class Server {
     const express = await import('express');
     const app = express.default();
     const port = this.config.port ?? 3000;
+    const host = this.config.host ?? '127.0.0.1';
     
     app.use(express.json());
+
+    app.use('/mcp', (req, res, next) => {
+      if (!this.isHttpAuthRequired()) {
+        next();
+        return;
+      }
+
+      if (this.isAuthorizedRequest(req)) {
+        next();
+        return;
+      }
+
+      res.status(401).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32001,
+          message: 'Unauthorized'
+        },
+        id: null
+      });
+    });
     
     // Handle POST requests for client-to-server communication
     app.post('/mcp', async (req, res) => {
@@ -174,7 +198,7 @@ export class Server {
     
     // Start the HTTP server
     await new Promise<void>((resolve, reject) => {
-      const httpServer = app.listen(port, () => {
+      const httpServer = app.listen(port, host, () => {
         httpServer.off('error', reject);
         log.info(`Server started with SSE transport on port ${this.getHttpPort() ?? port}`);
         resolve();
@@ -336,6 +360,36 @@ export class Server {
     }
 
     return sessionId;
+  }
+
+  /**
+   * Return whether HTTP authentication is enabled.
+   */
+  private isHttpAuthRequired(): boolean {
+    return this.config.authToken !== undefined;
+  }
+
+  /**
+   * Return whether the request has a valid bearer token.
+   */
+  private isAuthorizedRequest(req: Request): boolean {
+    const expectedToken = this.config.authToken;
+
+    if (expectedToken === undefined) {
+      return true;
+    }
+
+    const authorization = req.headers.authorization;
+    if (typeof authorization !== 'string') {
+      return false;
+    }
+
+    const match = authorization.match(/^Bearer\s+(.+)$/i);
+    if (!match) {
+      return false;
+    }
+
+    return match[1] === expectedToken;
   }
 
   /**

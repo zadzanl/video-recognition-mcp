@@ -33,40 +33,72 @@ export class Logger {
     return `[${timestamp}] [${level.toUpperCase()}] [${this.name}] ${message}`;
   }
 
+  private write(level: LogLevel, message: string, data?: unknown): void {
+    const suffix = this.formatDataSuffix(data);
+    console.error(this.formatMessage(level, message) + suffix);
+  }
+
+  private formatDataSuffix(data: unknown): string {
+    if (data === undefined) {
+      return '';
+    }
+
+    if (typeof data === 'string') {
+      return ` ${data}`;
+    }
+
+    if (data instanceof Error) {
+      return ` ${data.stack ?? data.message}`;
+    }
+
+    try {
+      return ` ${JSON.stringify(data)}`;
+    } catch {
+      return ` ${this.formatUnserializableData(data)}`;
+    }
+  }
+
+  private formatUnserializableData(data: unknown): string {
+    try {
+      return String(data);
+    } catch {
+      return '[Unserializable data]';
+    }
+  }
+
   verbose(message: string, data?: unknown): void {
     if (this.shouldLog(LogLevel.VERBOSE)) {
-      const formattedData = data ? JSON.stringify(data) : '';
-      console.log(this.formatMessage(LogLevel.VERBOSE, message), formattedData);
+      this.write(LogLevel.VERBOSE, message, data);
     }
   }
 
   debug(message: string, data?: unknown): void {
     if (this.shouldLog(LogLevel.DEBUG)) {
-      console.log(this.formatMessage(LogLevel.DEBUG, message), data || '');
+      this.write(LogLevel.DEBUG, message, data);
     }
   }
 
   info(message: string, data?: unknown): void {
     if (this.shouldLog(LogLevel.INFO)) {
-      console.log(this.formatMessage(LogLevel.INFO, message), data || '');
+      this.write(LogLevel.INFO, message, data);
     }
   }
 
   warn(message: string, data?: unknown): void {
     if (this.shouldLog(LogLevel.WARN)) {
-      console.warn(this.formatMessage(LogLevel.WARN, message), data || '');
+      this.write(LogLevel.WARN, message, data);
     }
   }
 
   error(message: string, error?: unknown): void {
     if (this.shouldLog(LogLevel.ERROR)) {
-      console.error(this.formatMessage(LogLevel.ERROR, message), error || '');
+      this.write(LogLevel.ERROR, message, error);
     }
   }
 
   fatal(message: string, error?: unknown): void {
     if (this.shouldLog(LogLevel.FATAL)) {
-      console.error(this.formatMessage(LogLevel.FATAL, message), error || '');
+      this.write(LogLevel.FATAL, message, error);
     }
   }
 }

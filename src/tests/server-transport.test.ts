@@ -121,6 +121,72 @@ describe('Server Streamable HTTP transport', () => {
       await server.stop();
     }
   });
+
+  it('rejects unauthenticated requests when MCP auth is configured', async () => {
+    const { server, baseUrl } = await startHttpServer({ authToken: 'secret-token' });
+
+    try {
+      const missingAuth = await postJson(baseUrl, initializeRequest(1));
+      assert.strictEqual(missingAuth.response.status, 401);
+      assertJsonRpcBody(missingAuth.body);
+      assert.strictEqual(missingAuth.body.error?.message, 'Unauthorized');
+      assert.strictEqual(missingAuth.body.error?.code, -32001);
+
+      const wrongAuth = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers: {
+          ...httpHeaders(),
+          Authorization: 'Bearer wrong-token'
+        },
+        body: JSON.stringify(initializeRequest(2))
+      });
+
+      assert.strictEqual(wrongAuth.status, 401);
+      const wrongAuthBody = JSON.parse(await wrongAuth.text()) as JsonRpcResponse;
+      assert.strictEqual(wrongAuthBody.error?.message, 'Unauthorized');
+      assert.strictEqual(wrongAuthBody.error?.code, -32001);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('allows authenticated initialize and tools requests when MCP auth is configured', async () => {
+    const { server, baseUrl } = await startHttpServer({ authToken: 'secret-token' });
+
+    try {
+      const initialize = await postJson(baseUrl, initializeRequest(1), undefined, {
+        Authorization: 'Bearer secret-token'
+      });
+
+      assert.strictEqual(initialize.response.status, 200);
+      assertJsonRpcBody(initialize.body);
+      assert.strictEqual(initialize.body.error, undefined);
+
+      const sessionId = initialize.response.headers.get('mcp-session-id');
+      assert.ok(sessionId, 'initialize response should include mcp-session-id');
+
+      const initialized = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers: {
+          ...httpHeaders(sessionId),
+          Authorization: 'Bearer secret-token'
+        },
+        body: JSON.stringify(initializedNotification())
+      });
+
+      assert.strictEqual(initialized.status, 202);
+
+      const listTools = await postJson(baseUrl, toolsListRequest(2), sessionId, {
+        Authorization: 'Bearer secret-token'
+      });
+
+      assert.strictEqual(listTools.response.status, 200);
+      assertJsonRpcBody(listTools.body);
+      assert.strictEqual(listTools.body.error, undefined);
+    } finally {
+      await server.stop();
+    }
+  });
 });
 
 async function startHttpServer(overrides: Partial<ServerConfig> = {}): Promise<{ server: Server; baseUrl: string }> {
@@ -147,11 +213,15 @@ async function startHttpServer(overrides: Partial<ServerConfig> = {}): Promise<{
 async function postJson(
   baseUrl: string,
   payload: Record<string, unknown>,
-  sessionId?: string
+  sessionId?: string,
+  extraHeaders: Record<string, string> = {}
 ): Promise<{ response: Response; body: JsonRpcResponse | undefined }> {
   const response = await fetch(`${baseUrl}/mcp`, {
     method: 'POST',
-    headers: httpHeaders(sessionId),
+    headers: {
+      ...httpHeaders(sessionId),
+      ...extraHeaders
+    },
     body: JSON.stringify(payload)
   });
 

@@ -23,12 +23,21 @@ function loadConfig(): ServerConfig {
   // Parse port if provided
   const portStr = process.env.PORT;
   const port = portStr ? parseInt(portStr, 10) : undefined;
+  const host = normalizeEnvValue(process.env.HOST) ?? '127.0.0.1';
+  const authToken = normalizeEnvValue(process.env.MCP_AUTH_TOKEN);
   
   return {
     recognition: loadRecognitionConfig(),
     transport: transportType,
-    port
+    port,
+    host,
+    authToken
   };
+}
+
+function normalizeEnvValue(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 /**
@@ -83,6 +92,6 @@ async function main(): Promise<void> {
 
 // Start the server
 main().catch(error => {
-  console.error('Unhandled error:', error);
+  log.fatal('Unhandled error', error);
   process.exit(1);
 });
