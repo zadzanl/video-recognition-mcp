@@ -6,7 +6,7 @@ import { createLogger } from '../utils/logger.js';
 import { ImageRecognitionParamsSchema } from '../types/index.js';
 import { ParallelDispatcher } from '../services/parallel-dispatcher.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { ImageRecognitionParams, ParallelInferenceConfig, RecognitionProvider } from '../types/index.js';
+import type { ImageRecognitionParams, ParallelInferenceConfig, RecognitionProvider, ToolDefinition } from '../types/index.js';
 
 const log = createLogger('ImageRecognitionTool');
 
@@ -16,7 +16,7 @@ export const createImageRecognitionTool = (
   recognitionProvider: RecognitionProvider,
   parallelConfig?: ParallelInferenceConfig,
   parallelDispatcher?: ParallelDispatch
-) => {
+): ToolDefinition<typeof ImageRecognitionParamsSchema> => {
   const baseDescription = `Analyze and describe images. This tool uses ${recognitionProvider.info.modelName} via ${recognitionProvider.info.providerLabel} to parse and explain image content.`;
   const activeParallelDispatcher = resolveParallelDispatcher(parallelConfig, parallelDispatcher);
 

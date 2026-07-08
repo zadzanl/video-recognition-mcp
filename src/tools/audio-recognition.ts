@@ -6,7 +6,7 @@ import { createLogger } from '../utils/logger.js';
 import { AudioRecognitionParamsSchema } from '../types/index.js';
 import { ParallelDispatcher } from '../services/parallel-dispatcher.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { AudioRecognitionParams, ParallelInferenceConfig, RecognitionProvider } from '../types/index.js';
+import type { AudioRecognitionParams, ParallelInferenceConfig, RecognitionProvider, ToolDefinition } from '../types/index.js';
 
 const log = createLogger('AudioRecognitionTool');
 
@@ -16,7 +16,7 @@ export const createAudioRecognitionTool = (
   recognitionProvider: RecognitionProvider,
   parallelConfig?: ParallelInferenceConfig,
   parallelDispatcher?: ParallelDispatch
-) => {
+): ToolDefinition<typeof AudioRecognitionParamsSchema> => {
   const baseDescription = `Analyze and transcribe audio. This tool uses ${recognitionProvider.info.modelName} via ${recognitionProvider.info.providerLabel} to parse and explain audio content.`;
   const activeParallelDispatcher = resolveParallelDispatcher(parallelConfig, parallelDispatcher);
 

@@ -4,6 +4,7 @@
 
 import { createLogger } from '../utils/logger.js';
 import type {
+  GeminiFile,
   GeminiRecognitionConfig,
   OpenAICompatibleRecognitionConfig,
   ProviderCallOptions,
@@ -91,8 +92,8 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
       candidates.push(...this.config.mimoModels);
     }
 
-    const attempted: Array<{ model: string; reason: string }> = [];
-    let geminiFile: any = null;
+    const attempted: { model: string; reason: string }[] = [];
+    let geminiFile: GeminiFile | null = null;
 
     while (true) {
       // Get remaining candidates that have not been attempted yet
@@ -235,7 +236,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
       candidates.push(...this.config.mimoModels);
     }
 
-    const attempted: Array<{ model: string; reason: string }> = [];
+    const attempted: { model: string; reason: string }[] = [];
 
     while (true) {
       const remainingCandidates = candidates.filter(c => !attempted.some(a => a.model === c));
@@ -363,11 +364,11 @@ interface OpenAICompatibleRequestBody {
 }
 
 interface OpenAICompatibleChatResponse {
-  choices?: Array<{
+  choices?: {
     message?: {
-      content?: string | Array<{ type?: string; text?: string }>;
+      content?: string | { type?: string; text?: string }[];
     };
-  }>;
+  }[];
   error?: {
     message?: string;
   };

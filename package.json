@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "dev": "tsc -w & node --watch dist/index.js",
     "debug": "tsc & npx @modelcontextprotocol/inspector node dist/index.js",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint src",
     "test": "tsc && node --test dist/tests/provider-config.test.js dist/tests/fallback.test.js dist/tests/routing.test.js dist/tests/parallel-dispatcher.test.js dist/tests/tool-parallel.test.js dist/tests/openai-compatible-provider.test.js"
   },
   "keywords": [
@@ -29,8 +29,12 @@
     "zod": "^3.24.3"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.1",
     "@types/node": "^22.14.1",
-    "typescript": "^5.8.3"
+    "eslint": "^10.6.0",
+    "globals": "^17.7.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.62.1"
   }
 }

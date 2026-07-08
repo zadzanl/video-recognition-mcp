@@ -3,7 +3,7 @@
  */
 
 import { z } from 'zod';
-import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 /**
  * Common parameters for all recognition tools
@@ -13,34 +13,34 @@ export const RecognitionParamsSchema = z.object({
   prompt: z.string().default('Describe this content').describe('Custom prompt for the recognition')
 });
 
-export type RecognitionParams = z.infer<typeof RecognitionParamsSchema>;
+export type RecognitionParams = z.input<typeof RecognitionParamsSchema>;
 
 /**
  * Video recognition specific types
  */
 export const VideoRecognitionParamsSchema = RecognitionParamsSchema.extend({});
-export type VideoRecognitionParams = z.infer<typeof VideoRecognitionParamsSchema>;
+export type VideoRecognitionParams = z.input<typeof VideoRecognitionParamsSchema>;
 
 /**
  * Image recognition specific types
  */
 export const ImageRecognitionParamsSchema = RecognitionParamsSchema.extend({});
-export type ImageRecognitionParams = z.infer<typeof ImageRecognitionParamsSchema>;
+export type ImageRecognitionParams = z.input<typeof ImageRecognitionParamsSchema>;
 
 /**
  * Audio recognition specific types
  */
 export const AudioRecognitionParamsSchema = RecognitionParamsSchema.extend({});
-export type AudioRecognitionParams = z.infer<typeof AudioRecognitionParamsSchema>;
+export type AudioRecognitionParams = z.input<typeof AudioRecognitionParamsSchema>;
 
 /**
  * Tool definitions
  */
-export interface ToolDefinition {
+export interface ToolDefinition<TInputSchema extends z.AnyZodObject = typeof RecognitionParamsSchema> {
   name: string;
   description: string;
-  inputSchema: z.ZodObject<any>;
-  callback: (args: any) => Promise<CallToolResult>;
+  inputSchema: TInputSchema;
+  callback: (args: z.input<TInputSchema>) => Promise<CallToolResult>;
 }
 
 /**

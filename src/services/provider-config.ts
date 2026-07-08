@@ -244,7 +244,7 @@ export function parseParallelAggregation(raw: string | undefined): ParallelAggre
 }
 
 export interface PromptTemplatesFile {
-  templates?: Array<{ name?: string; suffix?: string }>;
+  templates?: { name?: string; suffix?: string }[];
   headerMergeTemplate?: string;
   llmMergePrompt?: string;
 }

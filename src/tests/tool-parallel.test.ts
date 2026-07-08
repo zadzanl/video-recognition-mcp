@@ -7,16 +7,21 @@ import assert from 'node:assert/strict';
 import { createImageRecognitionTool } from '../tools/image-recognition.js';
 import { createAudioRecognitionTool } from '../tools/audio-recognition.js';
 import { createVideoRecognitionTool } from '../tools/video-recognition.js';
-import type { ParallelDispatchResult, ParallelInferenceConfig, RecognitionProvider, RecognitionRequest, RecognitionResult, ToolDefinition } from '../types/index.js';
+import type { ParallelDispatchResult, ParallelInferenceConfig, RecognitionProvider, RecognitionRequest, RecognitionResult } from '../types/index.js';
 
 const parallelSentence = 'This tool dispatches 3 parallel prompt variants per call for improved recognition quality (aggregation: header_merge).';
+
+type RecognitionToolDefinition =
+  | ReturnType<typeof createImageRecognitionTool>
+  | ReturnType<typeof createAudioRecognitionTool>
+  | ReturnType<typeof createVideoRecognitionTool>;
 
 interface ToolCase {
   label: string;
   mediaKind: RecognitionRequest['mediaKind'];
   defaultPrompt: string;
   expectedBaseDescription: string;
-  createTool: (provider: RecognitionProvider, config?: ParallelInferenceConfig, dispatcher?: FakeDispatcher) => ToolDefinition;
+  createTool: (provider: RecognitionProvider, config?: ParallelInferenceConfig, dispatcher?: FakeDispatcher) => RecognitionToolDefinition;
 }
 
 interface FakeDispatcher {

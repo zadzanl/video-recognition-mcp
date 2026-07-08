@@ -14,16 +14,15 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { classifyGeminiError } from '../services/gemini-error-classifier.js';
-import type { ErrorClassification } from '../services/gemini-error-classifier.js';
 import type {
   GeminiRecognitionConfig,
   GeminiFile,
   GeminiResponse,
-  RecognitionRequest,
-  RecognitionResult
+  RecognitionRequest
 } from '../types/index.js';
 import { RateLimitTracker } from '../services/rate-limit-tracker.js';
 import { buildParallelInferenceConfig } from '../services/provider-config.js';
+import type { GeminiService } from '../services/gemini.js';
 // ---------------------------------------------------------------------------
 // classifyGeminiError — retryable / fallback-eligible
 // ---------------------------------------------------------------------------
@@ -70,7 +69,7 @@ describe('classifyGeminiError retryable', () => {
 
   it('classifies ETIMEDOUT in cause as retryable', () => {
     const err = new Error('connect ETIMEDOUT');
-    (err as any).cause = 'ETIMEDOUT';
+    err.cause = 'ETIMEDOUT';
     const c = classifyGeminiError(err);
     assert.strictEqual(c.retryable, true);
   });
@@ -243,6 +242,12 @@ describe('classifyGeminiError fail-fast', () => {
 
 import { GeminiRecognitionProvider } from '../services/recognition-providers.js';
 
+type GeminiServiceMock = Partial<Pick<GeminiService, 'uploadFile' | 'processFile' | 'processText'>>;
+
+function asGeminiService(mock: GeminiServiceMock): GeminiService {
+  return mock as unknown as GeminiService;
+}
+
 const sampleFileUri = 'gs://test-bucket/test-file';
 const sampleFile: GeminiFile = {
   uri: sampleFileUri,
@@ -320,7 +325,7 @@ describe('GeminiRecognitionProvider fallback loop', () => {
     };
 
     const config = makeConfig(['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-lite']);
-    const provider = new GeminiRecognitionProvider(config, mockService as any);
+    const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
     const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
     assert.strictEqual(result.isError, undefined);
@@ -342,7 +347,7 @@ describe('GeminiRecognitionProvider fallback loop', () => {
     };
 
     const config = makeConfig(['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-lite']);
-    const provider = new GeminiRecognitionProvider(config, mockService as any);
+    const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
     const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
     assert.strictEqual(result.isError, undefined);
@@ -364,7 +369,7 @@ describe('GeminiRecognitionProvider fallback loop', () => {
     };
 
     const config = makeConfig(['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-lite']);
-    const provider = new GeminiRecognitionProvider(config, mockService as any);
+    const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
     const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
     assert.strictEqual(result.isError, undefined);
@@ -381,7 +386,7 @@ describe('GeminiRecognitionProvider fallback loop', () => {
     };
 
     const config = makeConfig(['gemini-3.5-flash', 'gemini-2.5-flash']);
-    const provider = new GeminiRecognitionProvider(config, mockService as any);
+    const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
     const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
     assert.strictEqual(result.isError, true);
@@ -402,7 +407,7 @@ describe('GeminiRecognitionProvider fallback loop', () => {
     };
 
     const config = makeConfig(['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-lite']);
-    const provider = new GeminiRecognitionProvider(config, mockService as any);
+    const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
     const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
     assert.strictEqual(result.isError, true);
@@ -423,7 +428,7 @@ describe('GeminiRecognitionProvider fallback loop', () => {
     };
 
     const config = makeConfig(['gemini-3.5-flash', 'gemini-2.5-flash']);
-    const provider = new GeminiRecognitionProvider(config, mockService as any);
+    const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
     const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
     assert.strictEqual(result.isError, true);
@@ -449,7 +454,7 @@ describe('GeminiRecognitionProvider fallback loop', () => {
     };
 
     const config = makeConfig(['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-lite']);
-    const provider = new GeminiRecognitionProvider(config, mockService as any);
+    const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
     await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
     assert.strictEqual(uploadCount, 1);
@@ -465,7 +470,7 @@ describe('GeminiRecognitionProvider fallback loop', () => {
     };
 
     const config = makeConfig(['gemini-3.5-flash']);
-    const provider = new GeminiRecognitionProvider(config, mockService as any);
+    const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
     const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
     assert.strictEqual(result.isError, true);
@@ -486,7 +491,7 @@ describe('GeminiRecognitionProvider fallback loop', () => {
     };
 
     const config = makeConfig([]);
-    const provider = new GeminiRecognitionProvider(config, mockService as any);
+    const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
     const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
     assert.strictEqual(result.isError, true);
@@ -511,7 +516,7 @@ describe('GeminiRecognitionProvider fallback loop', () => {
     };
 
     const config = makeConfig(['m1', 'm2', 'm3']);
-    const provider = new GeminiRecognitionProvider(config, mockService as any);
+    const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
     const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
     assert.strictEqual(result.isError, true);

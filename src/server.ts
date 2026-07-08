@@ -134,7 +134,7 @@ export class Server {
     app.use(express.json());
     
     // Map to store transports by session ID
-    const transports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
+    const transports = new Map<string, StreamableHTTPServerTransport>();
     
     // Handle POST requests for client-to-server communication
     app.post('/mcp', async (req, res) => {
@@ -142,10 +142,11 @@ export class Server {
         // Check for existing session ID
         const sessionId = req.headers['mcp-session-id'] as string | undefined;
         let transport: StreamableHTTPServerTransport;
+        const existingTransport = sessionId ? transports.get(sessionId) : undefined;
         
-        if (sessionId && transports[sessionId]) {
+        if (sessionId && existingTransport) {
           // Reuse existing transport
-          transport = transports[sessionId];
+          transport = existingTransport;
           log.debug(`Using existing transport for session: ${sessionId}`);
         } else {
           log.error('No valid session ID provided');
@@ -180,12 +181,12 @@ export class Server {
     // Reusable handler for GET and DELETE requests
     const handleSessionRequest = async (req: Request, res: Response) => {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
-      if (!sessionId || !transports[sessionId]) {
+      const transport = sessionId ? transports.get(sessionId) : undefined;
+      if (!sessionId || !transport) {
         res.status(400).send('Invalid or missing session ID');
         return;
       }
       
-      const transport = transports[sessionId];
       await transport.handleRequest(req, res);
     };
     
@@ -197,7 +198,7 @@ export class Server {
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sessionId) => {
             // Store the transport by session ID
-            transports[sessionId] = transport;
+            transports.set(sessionId, transport);
             log.info(`New session initialized: ${sessionId}`);
           }
         });
@@ -205,7 +206,7 @@ export class Server {
         // Clean up transport when closed
         transport.onclose = () => {
           if (transport.sessionId) {
-            delete transports[transport.sessionId];
+            transports.delete(transport.sessionId);
             log.info(`Session closed: ${transport.sessionId}`);
           }
         };

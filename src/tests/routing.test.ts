@@ -13,6 +13,46 @@ import { classifyGeminiError } from '../services/gemini-error-classifier.js';
 import { GeminiRecognitionProvider } from '../services/recognition-providers.js';
 import type { GeminiFile, GeminiResponse, ProviderCallOptions, RecognitionRequest } from '../types/index.js';
 import { buildParallelInferenceConfig } from '../services/provider-config.js';
+import type { GeminiService } from '../services/gemini.js';
+
+type GeminiServiceMock = Partial<Pick<GeminiService, 'uploadFile' | 'processFile' | 'processText'>>;
+
+interface CapturedTextContentPart {
+  type: 'text';
+  text: string;
+}
+
+interface CapturedImageContentPart {
+  type: 'image_url';
+  image_url: { url: string };
+}
+
+interface CapturedVideoContentPart {
+  type: 'video_url';
+  video_url: { url: string };
+}
+
+interface CapturedAudioContentPart {
+  type: 'input_audio';
+  input_audio: { data: string; format: string };
+}
+
+type CapturedMessageContentPart =
+  | CapturedTextContentPart
+  | CapturedImageContentPart
+  | CapturedVideoContentPart
+  | CapturedAudioContentPart;
+
+interface CapturedRequestMessage {
+  role: 'system' | 'developer' | 'user';
+  content: string | CapturedMessageContentPart[];
+}
+
+interface CapturedRequestBody {
+  model: string;
+  messages: CapturedRequestMessage[];
+  session_id?: string;
+}
 
 let globalTestTmpDir: string;
 
@@ -196,7 +236,7 @@ describe('Cross-Provider Routing Integration', () => {
     const processCalls: string[] = [];
     const mockService = {
       uploadFile: async () => sampleFile,
-      processFile: async (_f: any, _p: any, model: string): Promise<GeminiResponse> => {
+      processFile: async (_f: GeminiFile, _prompt: string, model: string): Promise<GeminiResponse> => {
         processCalls.push(model);
         // Throw retryable rate limit error
         throw Object.assign(new Error('Quota limit hit'), { name: 'ApiError', status: 429 });
@@ -219,24 +259,18 @@ describe('Cross-Provider Routing Integration', () => {
     // We stub fetch to mock the OpenAI-compatible HTTP response from OpenRouter
     const originalFetch = global.fetch;
     let openRouterCalled = false;
-    global.fetch = async (url, init): Promise<any> => {
+    global.fetch = async (url, init): Promise<Response> => {
       if (typeof url === 'string' && url.includes('openrouter.ai')) {
         openRouterCalled = true;
-        const body = JSON.parse(init?.body as string);
+        const body = parseRequestBody(init);
         assert.strictEqual(body.model, 'google/gemini-2.5-flash');
-        return {
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify({
-            choices: [{ message: { content: 'Success response from OpenRouter!' } }]
-          })
-        };
+        return chatCompletionResponse('Success response from OpenRouter!');
       }
       return originalFetch(url, init);
     };
 
     try {
-      const provider = new GeminiRecognitionProvider(config, mockService as any);
+      const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
       const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
       assert.strictEqual(result.isError, undefined);
@@ -271,23 +305,17 @@ describe('Cross-Provider Routing Integration', () => {
     const originalFetch = global.fetch;
     const originalAggregation = process.env.PARALLEL_AGGREGATION;
     process.env.PARALLEL_AGGREGATION = 'ALL_RETURN';
-    global.fetch = async (url, init): Promise<any> => {
+    global.fetch = async (url, init): Promise<Response> => {
       if (typeof url === 'string' && url.includes('openrouter.ai')) {
-        const body = JSON.parse(init?.body as string);
+        const body = parseRequestBody(init);
         assert.strictEqual(body.model, 'google/gemini-2.5-flash');
-        return {
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify({
-            choices: [{ message: { content: 'Success despite invalid process env aggregation' } }]
-          })
-        };
+        return chatCompletionResponse('Success despite invalid process env aggregation');
       }
       return originalFetch(url, init);
     };
 
     try {
-      const provider = new GeminiRecognitionProvider(config, mockService as any);
+      const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
       const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
       assert.strictEqual(result.isError, undefined);
@@ -337,34 +365,28 @@ describe('Cross-Provider Routing Integration', () => {
 
     const originalFetch = global.fetch;
     let openRouterCalled = false;
-    global.fetch = async (url, init): Promise<any> => {
+    global.fetch = async (url, init): Promise<Response> => {
       if (typeof url === 'string' && url.includes('openrouter.ai')) {
         openRouterCalled = true;
-        const headers = init?.headers as Record<string, string>;
-        const body = JSON.parse(init?.body as string);
+        const headers = readHeaders(init);
+        const body = parseRequestBody(init);
         assert.strictEqual(headers['X-OpenRouter-Cache'], 'true');
         assert.strictEqual(body.session_id, 'routing-session-1');
         assert.deepStrictEqual(body.messages[0], {
           role: 'system',
           content: 'Use stable recognition routing rules.'
         });
-        const content = body.messages[1].content as Array<any>;
+        const content = readContentParts(body.messages[1].content);
         assert.deepStrictEqual(content.map(part => part.type), ['text', 'image_url', 'text']);
-        assert.strictEqual(content[0].text, 'Describe the routed image.');
-        assert.strictEqual(content[2].text, 'Focus on fallback metadata.');
-        return {
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify({
-            choices: [{ message: { content: 'Recognition fallback kept options.' } }]
-          })
-        };
+        assert.strictEqual(expectContentPart(content[0], 'text').text, 'Describe the routed image.');
+        assert.strictEqual(expectContentPart(content[2], 'text').text, 'Focus on fallback metadata.');
+        return chatCompletionResponse('Recognition fallback kept options.');
       }
       return originalFetch(url, init);
     };
 
     try {
-      const provider = new GeminiRecognitionProvider(config, mockService as any);
+      const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
       const result = await provider.recognize({ ...baseRequest, filepath: testImagePath }, options);
 
       assert.strictEqual(result.isError, undefined);
@@ -399,11 +421,11 @@ describe('Cross-Provider Routing Integration', () => {
 
     const originalFetch = global.fetch;
     let openRouterCalled = false;
-    global.fetch = async (url, init): Promise<any> => {
+    global.fetch = async (url, init): Promise<Response> => {
       if (typeof url === 'string' && url.includes('openrouter.ai')) {
         openRouterCalled = true;
-        const headers = init?.headers as Record<string, string>;
-        const body = JSON.parse(init?.body as string);
+        const headers = readHeaders(init);
+        const body = parseRequestBody(init);
         assert.strictEqual(headers['X-OpenRouter-Cache'], 'false');
         assert.strictEqual(body.session_id, 'synthesis-session-1');
         assert.deepStrictEqual(body.messages, [
@@ -412,19 +434,13 @@ describe('Cross-Provider Routing Integration', () => {
             content: 'Synthesize routed fallback text.'
           }
         ]);
-        return {
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify({
-            choices: [{ message: { content: 'Synthesis fallback kept options.' } }]
-          })
-        };
+        return chatCompletionResponse('Synthesis fallback kept options.');
       }
       return originalFetch(url, init);
     };
 
     try {
-      const provider = new GeminiRecognitionProvider(config, mockService as any);
+      const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
       const result = await provider.synthesizeText('Synthesize routed fallback text.', { sessionId: 'synthesis-session-1' });
 
       assert.strictEqual(result.isError, undefined);
@@ -440,7 +456,7 @@ describe('Cross-Provider Routing Integration', () => {
     const processCalls: string[] = [];
     const mockService = {
       uploadFile: async () => sampleFile,
-      processFile: async (_f: any, _p: any, model: string): Promise<GeminiResponse> => {
+      processFile: async (_f: GeminiFile, _prompt: string, model: string): Promise<GeminiResponse> => {
         processCalls.push(model);
         // Throw fail-fast authentication error
         throw Object.assign(new Error('Invalid key'), { name: 'UNAUTHENTICATED', status: 401 });
@@ -461,7 +477,7 @@ describe('Cross-Provider Routing Integration', () => {
 
     const originalFetch = global.fetch;
     let openRouterCalled = false;
-    global.fetch = async (url, init): Promise<any> => {
+    global.fetch = async (url, init): Promise<Response> => {
       if (typeof url === 'string' && url.includes('openrouter.ai')) {
         openRouterCalled = true;
       }
@@ -469,7 +485,7 @@ describe('Cross-Provider Routing Integration', () => {
     };
 
     try {
-      const provider = new GeminiRecognitionProvider(config, mockService as any);
+      const provider = new GeminiRecognitionProvider(config, asGeminiService(mockService));
       const result = await provider.recognize({ ...baseRequest, filepath: testImagePath });
 
       assert.strictEqual(result.isError, true);
@@ -481,3 +497,39 @@ describe('Cross-Provider Routing Integration', () => {
     }
   });
 });
+
+function asGeminiService(mock: GeminiServiceMock): GeminiService {
+  return mock as unknown as GeminiService;
+}
+
+function parseRequestBody(init: RequestInit | undefined): CapturedRequestBody {
+  assert.ok(init);
+  return JSON.parse(String(init.body)) as CapturedRequestBody;
+}
+
+function readHeaders(init: RequestInit | undefined): Record<string, string> {
+  assert.ok(init);
+  return init.headers as Record<string, string>;
+}
+
+function readContentParts(content: CapturedRequestMessage['content']): CapturedMessageContentPart[] {
+  assert.ok(Array.isArray(content));
+  return content;
+}
+
+function expectContentPart<TType extends CapturedMessageContentPart['type']>(
+  part: CapturedMessageContentPart,
+  type: TType
+): Extract<CapturedMessageContentPart, { type: TType }> {
+  assert.strictEqual(part.type, type);
+  return part as Extract<CapturedMessageContentPart, { type: TType }>;
+}
+
+function chatCompletionResponse(content: string): Response {
+  return new Response(
+    JSON.stringify({
+      choices: [{ message: { content } }]
+    }),
+    { status: 200, statusText: 'OK' }
+  );
+}

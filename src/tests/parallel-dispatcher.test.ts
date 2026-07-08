@@ -7,7 +7,6 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ParallelDispatcher, sanitizeFailureReason } from '../services/parallel-dispatcher.js';
 import type {
-  ParallelAggregationMode,
   ParallelInferenceConfig,
   ProviderCallOptions,
   RecognitionProvider,
@@ -162,7 +161,7 @@ describe('ParallelDispatcher dispatch and aggregation', () => {
   });
 
   it('passes one shared session id and stable instruction to sibling recognition calls', async () => {
-    const calls: Array<{ request: RecognitionRequest; options?: ProviderCallOptions }> = [];
+    const calls: { request: RecognitionRequest; options?: ProviderCallOptions }[] = [];
     const provider = makeProvider({
       recognize: async (request, options) => {
         calls.push({ request, options });

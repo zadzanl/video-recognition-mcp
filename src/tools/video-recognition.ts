@@ -6,7 +6,7 @@ import { createLogger } from '../utils/logger.js';
 import { VideoRecognitionParamsSchema } from '../types/index.js';
 import { ParallelDispatcher } from '../services/parallel-dispatcher.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { ParallelInferenceConfig, RecognitionProvider, VideoRecognitionParams } from '../types/index.js';
+import type { ParallelInferenceConfig, RecognitionProvider, ToolDefinition, VideoRecognitionParams } from '../types/index.js';
 
 const log = createLogger('VideoRecognitionTool');
 
@@ -16,7 +16,7 @@ export const createVideoRecognitionTool = (
   recognitionProvider: RecognitionProvider,
   parallelConfig?: ParallelInferenceConfig,
   parallelDispatcher?: ParallelDispatch
-) => {
+): ToolDefinition<typeof VideoRecognitionParamsSchema> => {
   const baseDescription = `Analyze and describe videos. This tool uses ${recognitionProvider.info.modelName} via ${recognitionProvider.info.providerLabel} to parse and explain video content.`;
   const activeParallelDispatcher = resolveParallelDispatcher(parallelConfig, parallelDispatcher);
 

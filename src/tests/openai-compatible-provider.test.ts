@@ -10,9 +10,50 @@ import type {
 } from '../types/index.js';
 
 interface CapturedFetchCall {
-  body: any;
+  body: CapturedRequestBody;
   headers: Record<string, string>;
 }
+
+interface CapturedTextContentPart {
+  type: 'text';
+  text: string;
+}
+
+interface CapturedImageContentPart {
+  type: 'image_url';
+  image_url: { url: string };
+}
+
+interface CapturedVideoContentPart {
+  type: 'video_url';
+  video_url: { url: string };
+}
+
+interface CapturedAudioContentPart {
+  type: 'input_audio';
+  input_audio: { data: string; format: string };
+}
+
+type CapturedMessageContentPart =
+  | CapturedTextContentPart
+  | CapturedImageContentPart
+  | CapturedVideoContentPart
+  | CapturedAudioContentPart;
+
+interface CapturedRequestMessage {
+  role: 'system' | 'developer' | 'user';
+  content: string | CapturedMessageContentPart[];
+}
+
+interface CapturedRequestBody {
+  model: string;
+  messages: CapturedRequestMessage[];
+  session_id?: string;
+}
+
+type TestRecognitionProvider = RecognitionProvider & {
+  synthesizeText: NonNullable<RecognitionProvider['synthesizeText']>;
+};
 
 let tmpDir: string;
 let imagePath: string;
@@ -80,11 +121,11 @@ describe('OpenAI-compatible recognition provider request bodies', () => {
       content: 'Use stable image recognition rules.'
     });
     assert.strictEqual(body.messages[1].role, 'user');
-    const content = body.messages[1].content as Array<any>;
+    const content = readContentParts(body.messages[1].content);
     assert.deepStrictEqual(content.map(part => part.type), ['text', 'image_url', 'text']);
-    assert.strictEqual(content[0].text, 'Describe the image.');
-    assert.match(content[1].image_url.url, /^data:image\/png;base64,/);
-    assert.strictEqual(content[2].text, 'Focus on visible labels.');
+    assert.strictEqual(expectContentPart(content[0], 'text').text, 'Describe the image.');
+    assert.match(expectContentPart(content[1], 'image_url').image_url.url, /^data:image\/png;base64,/);
+    assert.strictEqual(expectContentPart(content[2], 'text').text, 'Focus on visible labels.');
   });
 
   it('keeps full request prompt before media when prompt layout is missing', async () => {
@@ -114,10 +155,10 @@ describe('OpenAI-compatible recognition provider request bodies', () => {
       role: 'system',
       content: 'Use stable recognition rules.'
     });
-    const content = body.messages[1].content as Array<any>;
+    const content = readContentParts(body.messages[1].content);
     assert.deepStrictEqual(content.map(part => part.type), ['text', 'image_url']);
-    assert.strictEqual(content[0].text, 'Use this complete prompt first.');
-    assert.match(content[1].image_url.url, /^data:image\/png;base64,/);
+    assert.strictEqual(expectContentPart(content[0], 'text').text, 'Use this complete prompt first.');
+    assert.match(expectContentPart(content[1], 'image_url').image_url.url, /^data:image\/png;base64,/);
   });
 
   for (const testCase of [
@@ -153,16 +194,17 @@ describe('OpenAI-compatible recognition provider request bodies', () => {
         }
       );
 
-      const content = calls[0].body.messages[0].content as Array<any>;
+      const content = readContentParts(calls[0].body.messages[0].content);
       assert.deepStrictEqual(content.map(part => part.type), ['text', testCase.expectedMediaType, 'text']);
-      assert.strictEqual(content[0].text, 'Stable prompt prefix.');
-      assert.strictEqual(content[2].text, 'Variable prompt suffix.');
+      assert.strictEqual(expectContentPart(content[0], 'text').text, 'Stable prompt prefix.');
+      assert.strictEqual(expectContentPart(content[2], 'text').text, 'Variable prompt suffix.');
 
       if (testCase.mediaKind === 'audio') {
-        assert.strictEqual(content[1].input_audio.format, 'wav');
-        assert.ok(content[1].input_audio.data.length > 0);
+        const audioPart = expectContentPart(content[1], 'input_audio');
+        assert.strictEqual(audioPart.input_audio.format, 'wav');
+        assert.ok(audioPart.input_audio.data.length > 0);
       } else {
-        assert.match(content[1].video_url.url, /^data:video\/mp4;base64,/);
+        assert.match(expectContentPart(content[1], 'video_url').video_url.url, /^data:video\/mp4;base64,/);
       }
     });
   }
@@ -174,8 +216,8 @@ describe('OpenAI-compatible text synthesis request bodies', () => {
     stubFetch(calls);
     const provider = makeProvider();
 
-    await provider.synthesizeText!('Prompt without session.');
-    await provider.synthesizeText!('Prompt with session.', { sessionId: 'session-text-1' });
+    await provider.synthesizeText('Prompt without session.');
+    await provider.synthesizeText('Prompt with session.', { sessionId: 'session-text-1' });
 
     assert.strictEqual(calls.length, 2);
     assert.deepStrictEqual(Object.keys(calls[0].body), ['model', 'messages']);
@@ -224,7 +266,7 @@ describe('OpenAI-compatible OpenRouter response cache header', () => {
         ...cacheConfig
       });
 
-      await provider.synthesizeText!('Prompt.');
+      await provider.synthesizeText('Prompt.');
 
       const headers = calls[0].headers;
       const cacheHeaders = Object.keys(headers).filter(header => header.toLowerCase().includes('cache'));
@@ -238,8 +280,8 @@ describe('OpenAI-compatible OpenRouter response cache header', () => {
   }
 });
 
-function makeProvider(overrides: Partial<OpenAICompatibleRecognitionConfig> = {}): RecognitionProvider {
-  return createRecognitionProvider({
+function makeProvider(overrides: Partial<OpenAICompatibleRecognitionConfig> = {}): TestRecognitionProvider {
+  const provider = createRecognitionProvider({
     provider: 'openai-compatible',
     providerLabel: 'Test OpenAI Compatible',
     modelName: 'test-model',
@@ -256,24 +298,45 @@ function makeProvider(overrides: Partial<OpenAICompatibleRecognitionConfig> = {}
     },
     ...overrides
   });
+
+  if (!provider.synthesizeText) {
+    throw new Error('Test provider must support text synthesis');
+  }
+
+  return provider as TestRecognitionProvider;
+}
+
+function readContentParts(content: CapturedRequestMessage['content']): CapturedMessageContentPart[] {
+  assert.ok(Array.isArray(content));
+  return content;
+}
+
+function expectContentPart<TType extends CapturedMessageContentPart['type']>(
+  part: CapturedMessageContentPart,
+  type: TType
+): Extract<CapturedMessageContentPart, { type: TType }> {
+  assert.strictEqual(part.type, type);
+  return part as Extract<CapturedMessageContentPart, { type: TType }>;
+}
+
+function parseRequestBody(body: BodyInit | null | undefined): CapturedRequestBody {
+  return JSON.parse(String(body)) as CapturedRequestBody;
 }
 
 function stubFetch(calls: CapturedFetchCall[]): void {
-  global.fetch = async (_url, init): Promise<any> => {
+  global.fetch = async (_url, init): Promise<Response> => {
     assert.ok(init);
     assert.strictEqual(init.method, 'POST');
     calls.push({
-      body: JSON.parse(String(init.body)),
+      body: parseRequestBody(init.body),
       headers: init.headers as Record<string, string>
     });
 
-    return {
-      ok: true,
-      status: 200,
-      statusText: 'OK',
-      text: async () => JSON.stringify({
+    return new Response(
+      JSON.stringify({
         choices: [{ message: { content: 'stub response' } }]
-      })
-    };
+      }),
+      { status: 200, statusText: 'OK' }
+    );
   };
 }
