@@ -3,7 +3,7 @@
     "video-recognition": {
       "command": "node",
       "args": [
-        "C:/path/to/mcp_video_recognition/dist/index.js"
+        "C:/absolute/path/to/video-recognition-mcp/dist/index.js"
       ],
       "env": {
         "RECOGNITION_PROVIDER": "openai-compatible",

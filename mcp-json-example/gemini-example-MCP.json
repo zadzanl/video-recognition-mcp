@@ -1,9 +1,9 @@
 {
   "inputs": [
     {
-      "id": "openrouter-api-key",
+      "id": "google-api-key",
       "type": "promptString",
-      "description": "OpenRouter API key for MCP Video Recognition",
+      "description": "Google Gemini API key",
       "password": true
     }
   ],
@@ -15,11 +15,8 @@
         "C:/absolute/path/to/video-recognition-mcp/dist/index.js"
       ],
       "env": {
-        "RECOGNITION_PROVIDER": "openai-compatible",
-        "OPENAI_COMPATIBLE_API_KEY": "${input:openrouter-api-key}",
-        "OPENAI_COMPATIBLE_BASE_URL": "https://openrouter.ai/api/v1",
-        "OPENAI_COMPATIBLE_MODEL": "xiaomi/mimo-v2.5",
-        "OPENAI_COMPATIBLE_PROVIDER_LABEL": "OpenRouter",
+        "RECOGNITION_PROVIDER": "gemini",
+        "GOOGLE_API_KEY": "${input:google-api-key}",
         "PARALLEL_PROMPTS": "1",
         "PARALLEL_AGGREGATION": "all_return",
         "LOG_LEVEL": "fatal"

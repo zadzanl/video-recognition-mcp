@@ -1,9 +1,20 @@
 {
   "name": "mcp-video-recognition",
   "version": "1.0.0",
-  "description": "MCP server for Google Gemini image, audio, and video recognition",
+  "description": "MCP server for Google Gemini and OpenAI-compatible image, audio, and video recognition",
   "main": "dist/index.js",
   "type": "module",
+  "files": [
+    "dist/index.*",
+    "dist/server.*",
+    "dist/services/**",
+    "dist/tools/**",
+    "dist/types/**",
+    "dist/utils/**",
+    "config/**",
+    "mcp-json-example/**",
+    ".env.example"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -15,12 +26,24 @@
   "keywords": [
     "mcp",
     "gemini",
+    "openai-compatible",
     "video",
     "audio",
     "image",
     "recognition"
   ],
-  "author": "",
+  "author": "mario-andreschak",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mario-andreschak/mcp_video_recognition.git"
+  },
+  "homepage": "https://github.com/mario-andreschak/mcp_video_recognition#readme",
+  "bugs": {
+    "url": "https://github.com/mario-andreschak/mcp_video_recognition/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "license": "MIT",
   "dependencies": {
     "@google/genai": "^0.9.0",

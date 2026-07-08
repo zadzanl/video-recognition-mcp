@@ -64,7 +64,7 @@ An MCP (Model Context Protocol) server that provides tools for image, audio, and
       "type": "stdio",
       "command": "node",
       "args": [
-        "C:/Projects/robot-thingy/video-recognition-mcp/dist/index.js"
+        "C:/absolute/path/to/video-recognition-mcp/dist/index.js"
       ],
       "env": {
         "RECOGNITION_PROVIDER": "openai-compatible",
@@ -106,6 +106,7 @@ The server is configured using environment variables. Provider/model selection i
 | `MIMO_MODELS` | Optional comma-separated list of models to use on MiMo fallback (default: `mimo-v2.5`). |
 | `MIMO_BASE_URL` | Optional. Base URL for MiMo API (default: `https://api.xiaomimimo.com/v1`). |
 | `RATE_LIMIT_MAX_WAIT_MS` | Optional. Maximum time (in milliseconds) the throttling queue will sleep and wait for rate-limiting slots before returning a timeout (default: `30000`). |
+| `RATE_LIMIT_TRACKER_PATH` | Optional. File path for the persistent rate-limit tracker state. Defaults to a temp file named `mcp-video-recognition-rate-limits.json`. |
 | `PARALLEL_PROMPTS` | Optional integer from `1` to `8`. Defaults to `1`; `1` disables parallel dispatch and preserves baseline single-call behavior. |
 | `PARALLEL_AGGREGATION` | Optional case-sensitive aggregation mode. Exact values: `all_return`, `header_merge`, `llm_merge`. Defaults to `all_return`. |
 
@@ -234,13 +235,11 @@ As of 2026-06-18, OpenRouter lists `xiaomi/mimo-v2.5` and describes it as native
 
 ### Transport and Logging
 
-- `TRANSPORT_TYPE`: Transport type to use (`stdio` or `sse`, defaults to `stdio`). When set to `sse`, the server starts an Express HTTP server using the MCP SDK's Streamable HTTP transport at `http://localhost:{PORT}/mcp`. This endpoint handles:
-  - `GET /mcp`: establishes a new SSE session (returns session ID via `Mcp-Session-Id` header)
-  - `POST /mcp`: client-to-server JSON-RPC messages (requires `Mcp-Session-Id` header)
-  - `DELETE /mcp`: terminates a session
-  - **No authentication is built in.** Anyone who can reach the port can use the server.
-- `PORT`: Port number for Streamable HTTP transport (defaults to `3000`)
-- `LOG_LEVEL`: Logging level (`verbose`, `debug`, `info`, `warn`, `error`, `fatal`). **Defaults to `fatal`**. Only fatal errors are logged unless you lower this.
+- `TRANSPORT_TYPE`: Transport type to use (`stdio` or `sse`, defaults to `stdio`). When set to `sse`, the server starts the MCP Streamable HTTP transport at `/mcp`.
+  - `HOST` defaults to `127.0.0.1`.
+  - `PORT` defaults to `3000`.
+  - `MCP_AUTH_TOKEN` enables optional bearer authentication for HTTP requests. Use it for any reachable HTTP endpoint.
+- `LOG_LEVEL`: Logging level (`verbose`, `debug`, `info`, `warn`, `error`, `fatal`). Defaults to `fatal`, and logs go to stderr.
 
 ## Usage
 
@@ -252,7 +251,7 @@ As of 2026-06-18, OpenRouter lists `xiaomi/mimo-v2.5` and describes it as native
 GOOGLE_API_KEY=your_api_key npm start
 ```
 
-#### With Streamable HTTP Transport (selected by `TRANSPORT_TYPE=sse`)
+#### With MCP Streamable HTTP Transport (selected by `TRANSPORT_TYPE=sse`)
 
 ```bash
 GOOGLE_API_KEY=your_api_key TRANSPORT_TYPE=sse PORT=3000 npm start
@@ -364,8 +363,8 @@ To verify response caching, inspect OpenRouter response metadata or raw HTTP hea
 | `start` | `node dist/index.js` | Run the built server (requires `build` first) |
 | `dev` | `tsc -w & node --watch dist/index.js` | Watch mode: recompile and restart on changes. **Windows note:** the `&` may not work in cmd/PowerShell; use separate terminals or a tool like `concurrently`. |
 | `debug` | `tsc & npx @modelcontextprotocol/inspector node dist/index.js` | Build then launch the MCP Inspector GUI for interactive debugging. Same Windows `&` caveat. |
-| `lint` | `eslint src --ext .ts` | Lint TypeScript sources. **Note:** ESLint is not currently configured in this project (no ESLint dependency or config file). This script will fail until ESLint tooling is added. |
-| `test` | `tsc && node --test dist/tests/provider-config.test.js dist/tests/fallback.test.js dist/tests/routing.test.js dist/tests/parallel-dispatcher.test.js dist/tests/tool-parallel.test.js dist/tests/openai-compatible-provider.test.js` | Compile TypeScript and run the unit/integration test suite. |
+| `lint` | `eslint src` | Lint TypeScript sources. |
+| `test` | `tsc && node --test dist/tests/logger.test.js dist/tests/provider-config.test.js dist/tests/fallback.test.js dist/tests/routing.test.js dist/tests/parallel-dispatcher.test.js dist/tests/tool-parallel.test.js dist/tests/openai-compatible-provider.test.js dist/tests/server-transport.test.js` | Compile TypeScript and run the unit/integration test suite. |
 
 ### Running in Development Mode
 
@@ -388,6 +387,7 @@ GOOGLE_API_KEY=your_api_key npm run dev
 - **Rate limits are per Google Cloud project**, not per API key. Using multiple API keys that share the same project does not increase quota because all keys draw from the same project-level pool.
 - **Fallback does not guarantee quota or availability.** If all configured models are rate-limited, unavailable, or unsupported in your region, fallback exhaustion returns an error listing each attempted model and its failure reason.
 - **Fallback is Gemini-only.** The OpenAI-compatible provider uses a single model configured via `OPENAI_COMPATIBLE_MODEL` and has no fallback chain. Its behavior is independent of Gemini model configuration.
+- **Shared throttle profiles:** `config/throttling-limits.json` also includes a `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` profile so provider-specific aliases can be tuned without code changes.
 
 ## Security & Privacy
 
@@ -396,7 +396,7 @@ GOOGLE_API_KEY=your_api_key npm run dev
 - **OpenAI-compatible data transport:** OpenAI-compatible mode embeds image/video files as base64 data URLs and audio files as raw base64 `input_audio` content parts in `/chat/completions` request bodies. This can increase payload size by roughly one third before HTTP overhead and sends the full media file to the configured provider endpoint.
 - **API keys:** `GOOGLE_API_KEY` and `OPENAI_COMPATIBLE_API_KEY` authenticate provider requests. Do not commit them or expose them in logs.
 - **Logging:** `LOG_LEVEL=verbose` may print prompts, file details, and provider responses from Gemini paths. The OpenAI-compatible provider does not log API keys or full base64 media payloads. Use verbose/debug logging only for local debugging.
-- **No authentication:** In Streamable HTTP mode (selected by `TRANSPORT_TYPE=sse`) the HTTP endpoint has no built-in auth. Anyone who can reach the port can invoke tools and consume provider API quota.
+- **HTTP authentication:** In Streamable HTTP mode, set `MCP_AUTH_TOKEN` and require the bearer token for any reachable HTTP endpoint. This is optional for local-only use, but recommended whenever the endpoint is exposed.
 
 ## License
 
