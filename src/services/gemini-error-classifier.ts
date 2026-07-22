@@ -31,17 +31,74 @@ export interface ErrorClassification {
   reason: string;
 }
 
+type TransportFailureCode = 'EPIPE' | 'EHOSTUNREACH';
+
+function isStructuredErrorValue(value: unknown): value is object {
+  return value !== null && (typeof value === 'object' || typeof value === 'function');
+}
+
+function readErrorProperty(
+  error: object,
+  property: 'name' | 'message' | 'status' | 'code' | 'cause'
+): unknown {
+  try {
+    return (error as Record<'name' | 'message' | 'status' | 'code' | 'cause', unknown>)[property];
+  } catch {
+    return undefined;
+  }
+}
+
+function stringifyErrorValue(value: unknown): string {
+  if (!value) return '';
+
+  try {
+    return String(value).toUpperCase();
+  } catch {
+    return '';
+  }
+}
+
+function findTransportFailureCode(error: unknown): TransportFailureCode | undefined {
+  const visited = new Set<object>();
+  let current = error;
+
+  for (let inspected = 0; inspected < 8 && isStructuredErrorValue(current); inspected += 1) {
+    if (visited.has(current)) {
+      return undefined;
+    }
+    visited.add(current);
+
+    const code = readErrorProperty(current, 'code');
+    if (code === 'EPIPE' || code === 'EHOSTUNREACH') {
+      return code;
+    }
+
+    current = readErrorProperty(current, 'cause');
+  }
+
+  return undefined;
+}
+
 function isGeminiApiError(err: unknown): err is GeminiApiErrorShape {
-  if (typeof err !== 'object' || err === null) return false;
-  const e = err as Record<string, unknown>;
+  if (!isStructuredErrorValue(err)) return false;
   return (
-    typeof e.name === 'string' ||
-    typeof e.message === 'string' ||
-    typeof e.status === 'number' ||
-    typeof e.status === 'string' ||
-    typeof e.code === 'number' ||
-    typeof e.code === 'string'
+    typeof readErrorProperty(err, 'name') === 'string' ||
+    typeof readErrorProperty(err, 'message') === 'string' ||
+    typeof readErrorProperty(err, 'status') === 'number' ||
+    typeof readErrorProperty(err, 'status') === 'string' ||
+    typeof readErrorProperty(err, 'code') === 'number' ||
+    typeof readErrorProperty(err, 'code') === 'string'
   );
+}
+
+function isErrorInstance(value: unknown): value is Error {
+  try {
+    return value instanceof Error;
+  } catch {
+    // Proxies can throw during instanceof prototype traversal. Treat them as
+    // an unknown throw value rather than allowing classification to throw.
+    return false;
+  }
 }
 
 /**
@@ -51,27 +108,31 @@ function isGeminiApiError(err: unknown): err is GeminiApiErrorShape {
 function normalizeError(err: GeminiApiErrorShape): { statusNum: number | undefined; tokens: string } {
   const parts: string[] = [];
   let statusNum: number | undefined = undefined;
+  const status = readErrorProperty(err, 'status');
+  const code = readErrorProperty(err, 'code');
+  const name = readErrorProperty(err, 'name');
+  const message = readErrorProperty(err, 'message');
 
   // Status: numeric -> statusNum; string -> token (and maybe parse)
-  if (typeof err.status === 'number') {
-    statusNum = err.status;
-  } else if (typeof err.status === 'string') {
-    parts.push(err.status.toUpperCase());
-    const parsed = parseInt(err.status, 10);
+  if (typeof status === 'number') {
+    statusNum = status;
+  } else if (typeof status === 'string') {
+    parts.push(status.toUpperCase());
+    const parsed = parseInt(status, 10);
     if (!isNaN(parsed)) statusNum = parsed;
   }
 
   // Code: numeric -> statusNum (if not already set); string -> token
-  if (typeof err.code === 'number') {
-    if (statusNum === undefined) statusNum = err.code;
-  } else if (typeof err.code === 'string') {
-    parts.push(err.code.toUpperCase());
-    const parsed = parseInt(err.code, 10);
+  if (typeof code === 'number') {
+    if (statusNum === undefined) statusNum = code;
+  } else if (typeof code === 'string') {
+    parts.push(code.toUpperCase());
+    const parsed = parseInt(code, 10);
     if (!isNaN(parsed) && statusNum === undefined) statusNum = parsed;
   }
 
-  if (err.name) parts.push(err.name.toUpperCase());
-  if (err.message) parts.push(err.message.toUpperCase());
+  if (typeof name === 'string') parts.push(name.toUpperCase());
+  if (typeof message === 'string') parts.push(message.toUpperCase());
 
   return { statusNum, tokens: parts.join(' ') };
 }
@@ -148,10 +209,11 @@ export function classifyGeminiError(error: unknown): ErrorClassification {
   }
 
   // Network/transient errors (Error instances with cause codes)
-  if (error instanceof Error) {
-    const msg = (error.message ?? '').toUpperCase();
-    const cause = (error as { cause?: unknown }).cause;
-    const causeStr = cause ? String(cause).toUpperCase() : '';
+  if (isErrorInstance(error)) {
+    const message = readErrorProperty(error, 'message');
+    const messageText = typeof message === 'string' ? message : '';
+    const msg = messageText.toUpperCase();
+    const causeStr = stringifyErrorValue(readErrorProperty(error, 'cause'));
     const combined = `${msg} ${causeStr}`;
 
     if (/DEADLINE_EXCEEDED/.test(combined))
@@ -167,8 +229,22 @@ export function classifyGeminiError(error: unknown): ErrorClassification {
     if (/ABORT/i.test(combined))
       return { retryable: true, reason: 'request aborted' };
 
+    const transportFailureCode = findTransportFailureCode(error);
+    if (transportFailureCode === 'EPIPE')
+      return { retryable: true, reason: 'broken pipe' };
+    if (transportFailureCode === 'EHOSTUNREACH')
+      return { retryable: true, reason: 'host unreachable' };
+
     // Generic Error: fail-fast
-    return { retryable: false, reason: error.message.slice(0, 200) };
+    return { retryable: false, reason: messageText.slice(0, 200) };
+  }
+
+  const transportFailureCode = findTransportFailureCode(error);
+  if (transportFailureCode === 'EPIPE') {
+    return { retryable: true, reason: 'broken pipe' };
+  }
+  if (transportFailureCode === 'EHOSTUNREACH') {
+    return { retryable: true, reason: 'host unreachable' };
   }
 
   // Unknown throw type: fail-fast

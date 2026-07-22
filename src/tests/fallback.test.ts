@@ -80,6 +80,20 @@ describe('classifyGeminiError retryable', () => {
     assert.strictEqual(c.retryable, true);
   });
 
+  it('classifies a top-level EPIPE code as retryable with a broken pipe reason', () => {
+    const c = classifyGeminiError(Object.assign(new Error('write failed'), { code: 'EPIPE' }));
+    assert.strictEqual(c.retryable, true);
+    assert.strictEqual(c.reason, 'broken pipe');
+  });
+
+  it('classifies a nested EHOSTUNREACH cause code as retryable with a host unreachable reason', () => {
+    const c = classifyGeminiError(
+      Object.assign(new Error('connection failed'), { cause: { code: 'EHOSTUNREACH' } })
+    );
+    assert.strictEqual(c.retryable, true);
+    assert.strictEqual(c.reason, 'host unreachable');
+  });
+
   it('classifies EAI_AGAIN as retryable', () => {
     const err = new Error('getaddrinfo EAI_AGAIN');
     const c = classifyGeminiError(err);
@@ -175,6 +189,26 @@ describe('classifyGeminiError fail-fast', () => {
   it('classifies generic Error as fail-fast', () => {
     const c = classifyGeminiError(new Error('Something unusual happened'));
     assert.strictEqual(c.retryable, false);
+  });
+
+  it('does not classify EPIPE or EHOSTUNREACH message text as retryable', () => {
+    assert.strictEqual(classifyGeminiError(new Error('write EPIPE')).retryable, false);
+    assert.strictEqual(classifyGeminiError(new Error('connect EHOSTUNREACH')).retryable, false);
+  });
+
+  it('safely handles cyclic causes and hostile cause getters', () => {
+    const cyclic = new Error('ordinary failure') as Error & { cause?: unknown };
+    cyclic.cause = cyclic;
+
+    const hostile = new Error('ordinary failure');
+    Object.defineProperty(hostile, 'cause', {
+      get() {
+        throw new Error('cause access should not escape classification');
+      }
+    });
+
+    assert.doesNotThrow(() => classifyGeminiError(cyclic));
+    assert.doesNotThrow(() => classifyGeminiError(hostile));
   });
 
   it('classifies unknown throw as fail-fast', () => {

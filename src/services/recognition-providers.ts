@@ -11,6 +11,7 @@ import type {
   RecognitionProvider,
   RecognitionRequest,
   RecognitionResult,
+  RecognitionUsageMetadata,
   ResolvedRecognitionConfig
 } from '../types/index.js';
 import { GeminiService } from './gemini.js';
@@ -23,29 +24,187 @@ import { DEFAULT_MAX_INLINE_MEDIA_BYTES } from './provider-config.js';
 
 const log = createLogger('RecognitionProviders');
 
-export function classifyOpenAiError(message: string): { retryable: boolean; reason: string } {
-  const msg = message.toUpperCase();
-  const hasCode = (code: number): boolean => new RegExp(`(^|[^0-9])${code}([^0-9]|$)`).test(msg);
+const openAiCompatibleFailureOrigin = Symbol('openAiCompatibleFailureOrigin');
 
-  if (hasCode(401) || /UNAUTHORIZED|INVALID API KEY|INVALID_API_KEY/.test(msg)) {
+type OpenAICompatibleFailureOrigin =
+  | { kind: 'http'; status: number }
+  | { kind: 'transport'; stage: 'fetch'; error: unknown }
+  | { kind: 'transport'; stage: 'response-read'; status: number; error: unknown }
+  | { kind: 'local'; stage: 'validation' | 'encoding' | 'request-build'; error: unknown }
+  | { kind: 'structural'; stage: 'unsupported-response-shape' };
+
+function createOpenAICompatibleFailure(
+  text: string,
+  origin: OpenAICompatibleFailureOrigin
+): RecognitionResult {
+  const result: RecognitionResult = { text, isError: true };
+  Object.defineProperty(result, openAiCompatibleFailureOrigin, {
+    value: origin,
+    enumerable: false,
+    writable: false,
+    configurable: false
+  });
+  return result;
+}
+
+type TransportFailureCode = 'EPIPE' | 'EHOSTUNREACH';
+
+function readOpenAICompatibleFailureOrigin(result: RecognitionResult): OpenAICompatibleFailureOrigin | undefined {
+  try {
+    const origin = (result as unknown as Record<symbol, unknown>)[openAiCompatibleFailureOrigin];
+    if (!origin || typeof origin !== 'object') {
+      return undefined;
+    }
+
+    const candidate = origin as Partial<OpenAICompatibleFailureOrigin>;
+    if (candidate.kind === 'http' && typeof candidate.status === 'number') {
+      return candidate as OpenAICompatibleFailureOrigin;
+    }
+    if (candidate.kind === 'transport' && candidate.stage === 'fetch') {
+      return candidate as OpenAICompatibleFailureOrigin;
+    }
+    if (
+      candidate.kind === 'transport'
+      && candidate.stage === 'response-read'
+      && typeof candidate.status === 'number'
+    ) {
+      return candidate as OpenAICompatibleFailureOrigin;
+    }
+    if (candidate.kind === 'local' || candidate.kind === 'structural') {
+      return candidate as OpenAICompatibleFailureOrigin;
+    }
+  } catch {
+    // A result can only carry this symbol when created in this module, but do
+    // not let an unexpected getter/proxy disrupt fallback routing.
+  }
+
+  return undefined;
+}
+
+function classifyAuthoritativeHttpStatus(status: number): ErrorClassification {
+  switch (status) {
+    case 401:
+      return { retryable: false, reason: 'unauthenticated' };
+    case 402:
+      return { retryable: false, reason: 'payment required' };
+    case 403:
+      return { retryable: false, reason: 'permission denied' };
+    case 400:
+      return { retryable: false, reason: 'invalid request/argument' };
+    case 429:
+      return { retryable: true, reason: 'rate limited (429)' };
+    case 500:
+      return { retryable: true, reason: 'internal server error (500)' };
+    case 502:
+    case 503:
+    case 504:
+      return { retryable: true, reason: 'transient upstream error' };
+    default:
+      if (Number.isInteger(status) && status >= 400 && status < 500) {
+        return { retryable: false, reason: `HTTP client error (${status})` };
+      }
+      return { retryable: false, reason: 'unrecognized HTTP failure' };
+  }
+}
+
+function isStructuredErrorValue(value: unknown): value is object {
+  return value !== null && (typeof value === 'object' || typeof value === 'function');
+}
+
+function readStructuredErrorProperty(error: object, property: 'code' | 'cause'): unknown {
+  try {
+    return (error as Record<'code' | 'cause', unknown>)[property];
+  } catch {
+    return undefined;
+  }
+}
+
+function findTransportFailureCode(error: unknown): TransportFailureCode | undefined {
+  const visited = new Set<object>();
+  let current = error;
+
+  for (let inspected = 0; inspected < 8 && isStructuredErrorValue(current); inspected += 1) {
+    if (visited.has(current)) {
+      return undefined;
+    }
+    visited.add(current);
+
+    const code = readStructuredErrorProperty(current, 'code');
+    if (code === 'EPIPE' || code === 'EHOSTUNREACH') {
+      return code;
+    }
+
+    current = readStructuredErrorProperty(current, 'cause');
+  }
+
+  return undefined;
+}
+
+function findRecognizableHttpStatus(message: string): number | undefined {
+  const httpOrStatusMatch = /\b(?:HTTP(?:\s+STATUS)?|STATUS(?:\s+CODE)?)\s*(?:[:=]\s*|\(\s*)?([1-5]\d{2})\b/i.exec(message);
+  const apiErrorMatch = /\bAPI\s+ERROR\s*\(\s*([1-5]\d{2})\b/i.exec(message);
+  const statusMatch = !apiErrorMatch || (httpOrStatusMatch && httpOrStatusMatch.index < apiErrorMatch.index)
+    ? httpOrStatusMatch
+    : apiErrorMatch;
+  return statusMatch ? Number.parseInt(statusMatch[1], 10) : undefined;
+}
+
+function classifyOpenAICompatibleFailure(result: RecognitionResult): ErrorClassification {
+  const origin = readOpenAICompatibleFailureOrigin(result);
+  if (!origin) {
+    return classifyOpenAiError(result.text);
+  }
+
+  if (origin.kind === 'http') {
+    return classifyAuthoritativeHttpStatus(origin.status);
+  }
+
+  if (origin.kind === 'transport') {
+    if (origin.stage === 'response-read' && (origin.status < 200 || origin.status >= 300)) {
+      return classifyAuthoritativeHttpStatus(origin.status);
+    }
+
+    const transportCode = findTransportFailureCode(origin.error);
+    if (transportCode === 'EPIPE') {
+      return { retryable: true, reason: 'broken pipe' };
+    }
+    if (transportCode === 'EHOSTUNREACH') {
+      return { retryable: true, reason: 'host unreachable' };
+    }
+    return { retryable: true, reason: 'transient network failure' };
+  }
+
+  if (origin.kind === 'local') {
+    return { retryable: false, reason: 'local provider failure' };
+  }
+
+  return { retryable: false, reason: 'unsupported response shape' };
+}
+
+export function classifyOpenAiError(message: string): { retryable: boolean; reason: string } {
+  const status = findRecognizableHttpStatus(message);
+  if (status !== undefined) {
+    return classifyAuthoritativeHttpStatus(status);
+  }
+
+  const msg = message.toUpperCase();
+
+  if (/UNAUTHORIZED|INVALID API KEY|INVALID_API_KEY/.test(msg)) {
     return { retryable: false, reason: 'unauthenticated' };
   }
-  if (hasCode(402)) {
-    return { retryable: false, reason: 'payment required' };
-  }
-  if (hasCode(403) || /FORBIDDEN|PERMISSION_DENIED|PERMISSION DENIED/.test(msg)) {
+  if (/FORBIDDEN|PERMISSION_DENIED|PERMISSION DENIED/.test(msg)) {
     return { retryable: false, reason: 'permission denied' };
   }
-  if (hasCode(400) || /INVALID_ARGUMENT|INVALID REQUEST|INVALID_REQUEST|MALFORMED|UNSUPPORTED MEDIA|UNSUPPORTED/.test(msg)) {
+  if (/INVALID_ARGUMENT|INVALID REQUEST|INVALID_REQUEST|MALFORMED|UNSUPPORTED MEDIA|UNSUPPORTED/.test(msg)) {
     return { retryable: false, reason: 'invalid request/argument' };
   }
-  if (hasCode(429) || /RATE LIMIT|TOO MANY REQUESTS|RESOURCE_EXHAUSTED/.test(msg)) {
+  if (/RATE LIMIT|TOO MANY REQUESTS|RESOURCE_EXHAUSTED/.test(msg)) {
     return { retryable: true, reason: 'rate limited (429)' };
   }
-  if (hasCode(500) || /INTERNAL SERVER/.test(msg)) {
+  if (/INTERNAL SERVER/.test(msg)) {
     return { retryable: true, reason: 'internal server error (500)' };
   }
-  if (hasCode(502) || hasCode(503) || hasCode(504) || /BAD GATEWAY|SERVICE UNAVAILABLE|GATEWAY TIMEOUT/.test(msg)) {
+  if (/BAD GATEWAY|SERVICE UNAVAILABLE|GATEWAY TIMEOUT/.test(msg)) {
     return { retryable: true, reason: 'transient upstream error' };
   }
   if (/TIMEOUT|DEADLINE[_ ]EXCEEDED|ABORTED|ABORT_ERR|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|FETCH FAILED|FAILED TO FETCH|UND_ERR/.test(msg)) {
@@ -171,7 +330,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
           const provider = new OpenAICompatibleRecognitionProvider(openRouterConfig);
           const result = await provider.recognize(request, options);
           if (result.isError) {
-            const classification = classifyOpenAiError(result.text);
+            const classification = classifyOpenAICompatibleFailure(result);
             log.warn(`OpenRouter model ${selectedModel} failed: ${classification.reason}`);
             if (!classification.retryable) {
               log.error(`OpenRouter fail-fast error on model ${selectedModel}: ${classification.reason}`);
@@ -197,7 +356,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
           const provider = new OpenAICompatibleRecognitionProvider(mimoConfig);
           const result = await provider.recognize(request, options);
           if (result.isError) {
-            const classification = classifyOpenAiError(result.text);
+            const classification = classifyOpenAICompatibleFailure(result);
             log.warn(`MiMo model ${selectedModel} failed: ${classification.reason}`);
             if (!classification.retryable) {
               log.error(`MiMo fail-fast error on model ${selectedModel}: ${classification.reason}`);
@@ -304,7 +463,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
           const provider = new OpenAICompatibleRecognitionProvider(openRouterConfig);
           const result = await provider.synthesizeText(prompt, options);
           if (result.isError) {
-            const classification = classifyOpenAiError(result.text);
+            const classification = classifyOpenAICompatibleFailure(result);
             log.warn(`OpenRouter text synthesis model ${selectedModel} failed: ${classification.reason}`);
             if (!classification.retryable) {
               return result;
@@ -328,7 +487,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
           const provider = new OpenAICompatibleRecognitionProvider(mimoConfig);
           const result = await provider.synthesizeText(prompt, options);
           if (result.isError) {
-            const classification = classifyOpenAiError(result.text);
+            const classification = classifyOpenAICompatibleFailure(result);
             log.warn(`MiMo text synthesis model ${selectedModel} failed: ${classification.reason}`);
             if (!classification.retryable) {
               return result;
@@ -385,14 +544,11 @@ interface OpenAICompatibleRequestBody {
 }
 
 interface OpenAICompatibleChatResponse {
-  choices?: {
-    message?: {
-      content?: string | { type?: string; text?: string }[];
-    };
-  }[];
-  error?: {
-    message?: string;
-  };
+  id?: unknown;
+  model?: unknown;
+  usage?: unknown;
+  choices?: unknown;
+  error?: unknown;
 }
 
 class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
@@ -409,10 +565,18 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
   }
 
   async recognize(request: RecognitionRequest, options?: ProviderCallOptions): Promise<RecognitionResult> {
+    let media: Awaited<ReturnType<typeof validateMediaFile>>;
     try {
-      const media = await validateMediaFile(this.info.providerLabel, this.info.provider, request.mediaKind, request.filepath);
+      media = await validateMediaFile(this.info.providerLabel, this.info.provider, request.mediaKind, request.filepath);
+    } catch (error) {
+      return createOpenAICompatibleFailure(
+        `Error processing file with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
+        { kind: 'local', stage: 'validation', error }
+      );
+    }
 
-      let mediaPart: OpenAICompatibleMessageContentPart;
+    let mediaPart: OpenAICompatibleMessageContentPart;
+    try {
       if (request.mediaKind === 'audio') {
         const rawBase64 = await createRawBase64(media, this.config.maxInlineMediaBytes);
         const format = audioFormatFromExtension(media.extension);
@@ -421,86 +585,131 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
         const dataUrl = await createBase64DataUrl(media, this.config.maxInlineMediaBytes);
         mediaPart = this.createMediaPart(request.mediaKind, dataUrl);
       }
+    } catch (error) {
+      return createOpenAICompatibleFailure(
+        `Error processing file with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
+        { kind: 'local', stage: 'encoding', error }
+      );
+    }
 
+    let requestInit: RequestInit;
+    try {
       log.debug(`Sending ${request.mediaKind} recognition request to ${this.info.providerLabel} using model ${this.info.modelName}`);
-
       const messages = this.createRecognitionMessages(request, mediaPart, options);
-
-      const response = await fetch(this.chatCompletionsUrl, {
+      requestInit = {
         method: 'POST',
         headers: this.createRequestHeaders(),
         body: JSON.stringify(this.createRequestBody(messages, options))
-      });
-
-      const responseText = await response.text();
-      const parsed = this.parseJsonResponse(responseText);
-
-      if (!response.ok) {
-        return {
-          text: `${this.info.providerLabel} API error (${response.status} ${response.statusText}): ${sanitizeOpenAiErrorText(this.extractErrorMessage(parsed, responseText))}`,
-          isError: true
-        };
-      }
-
-      const text = this.extractAssistantText(parsed);
-      if (!text) {
-        return {
-          text: `${this.info.providerLabel} returned an unsupported or empty chat completion response shape`,
-          isError: true
-        };
-      }
-
-      return { text };
-    } catch (error) {
-      return {
-        text: `Error processing file with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
-        isError: true
       };
+    } catch (error) {
+      return createOpenAICompatibleFailure(
+        `Error processing file with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
+        { kind: 'local', stage: 'request-build', error }
+      );
     }
+
+    let response: Response;
+    try {
+      response = await fetch(this.chatCompletionsUrl, requestInit);
+    } catch (error) {
+      return createOpenAICompatibleFailure(
+        `Error processing file with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
+        { kind: 'transport', stage: 'fetch', error }
+      );
+    }
+
+    let responseText: string;
+    try {
+      responseText = await response.text();
+    } catch (error) {
+      return createOpenAICompatibleFailure(
+        `Error processing file with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
+        { kind: 'transport', stage: 'response-read', status: response.status, error }
+      );
+    }
+
+    const parsed = this.parseJsonResponse(responseText);
+
+    if (!response.ok) {
+      return createOpenAICompatibleFailure(
+        `${this.info.providerLabel} API error (${response.status} ${response.statusText}): ${sanitizeOpenAiErrorText(this.extractErrorMessage(parsed, responseText))}`,
+        { kind: 'http', status: response.status }
+      );
+    }
+
+    const text = this.extractAssistantText(parsed);
+    if (!text) {
+      return createOpenAICompatibleFailure(
+        `${this.info.providerLabel} returned an unsupported or empty chat completion response shape`,
+        { kind: 'structural', stage: 'unsupported-response-shape' }
+      );
+    }
+
+    const usage = this.extractUsageMetadata(parsed);
+    return usage ? { text, usage } : { text };
   }
 
   async synthesizeText(prompt: string, options?: ProviderCallOptions): Promise<RecognitionResult> {
+    let requestInit: RequestInit;
     try {
       log.debug(`Sending text-only synthesis request to ${this.info.providerLabel} using model ${this.info.modelName}`);
-
       const messages: OpenAICompatibleMessage[] = [
         {
           role: 'user',
           content: prompt
         }
       ];
-
-      const response = await fetch(this.chatCompletionsUrl, {
+      requestInit = {
         method: 'POST',
         headers: this.createRequestHeaders(),
         body: JSON.stringify(this.createRequestBody(messages, options))
-      });
-
-      const responseText = await response.text();
-      const parsed = this.parseJsonResponse(responseText);
-
-      if (!response.ok) {
-        return {
-          text: `${this.info.providerLabel} API error (${response.status} ${response.statusText}): ${sanitizeOpenAiErrorText(this.extractErrorMessage(parsed, responseText))}`,
-          isError: true
-        };
-      }
-
-      const text = this.extractAssistantText(parsed);
-      if (!text) {
-        return {
-          text: `${this.info.providerLabel} returned an unsupported or empty text synthesis response shape`,
-          isError: true
-        };
-      }
-
-      return { text };
-    } catch (error) {
-      return {
-        text: `Error synthesizing text with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
-        isError: true
       };
+    } catch (error) {
+      return createOpenAICompatibleFailure(
+        `Error synthesizing text with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
+        { kind: 'local', stage: 'request-build', error }
+      );
     }
+
+    let response: Response;
+    try {
+      response = await fetch(this.chatCompletionsUrl, requestInit);
+    } catch (error) {
+      return createOpenAICompatibleFailure(
+        `Error synthesizing text with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
+        { kind: 'transport', stage: 'fetch', error }
+      );
+    }
+
+    let responseText: string;
+    try {
+      responseText = await response.text();
+    } catch (error) {
+      return createOpenAICompatibleFailure(
+        `Error synthesizing text with ${this.info.providerLabel}: ${sanitizeOpenAiErrorText(error instanceof Error ? error.message : String(error))}`,
+        { kind: 'transport', stage: 'response-read', status: response.status, error }
+      );
+    }
+
+    const parsed = this.parseJsonResponse(responseText);
+
+    if (!response.ok) {
+      return createOpenAICompatibleFailure(
+        `${this.info.providerLabel} API error (${response.status} ${response.statusText}): ${sanitizeOpenAiErrorText(this.extractErrorMessage(parsed, responseText))}`,
+        { kind: 'http', status: response.status }
+      );
+    }
+
+    const text = this.extractAssistantText(parsed);
+    if (!text) {
+      return createOpenAICompatibleFailure(
+        `${this.info.providerLabel} returned an unsupported or empty text synthesis response shape`,
+        { kind: 'structural', stage: 'unsupported-response-shape' }
+      );
+    }
+
+    const usage = this.extractUsageMetadata(parsed);
+    return usage ? { text, usage } : { text };
   }
 
   private createMediaPart(mediaKind: 'image' | 'video', dataUrl: string): OpenAICompatibleMessageContentPart {
@@ -615,24 +824,108 @@ class OpenAICompatibleRecognitionProvider implements RecognitionProvider {
   }
 
   private extractAssistantText(response: OpenAICompatibleChatResponse | undefined): string | undefined {
-    const content = response?.choices?.[0]?.message?.content;
-    if (typeof content === 'string') {
-      return content;
-    }
+    try {
+      const choices = response?.choices;
+      if (!Array.isArray(choices)) {
+        return undefined;
+      }
 
-    if (Array.isArray(content)) {
-      return content
-        .map(part => part.text)
-        .filter((text): text is string => Boolean(text))
-        .join('\n');
-    }
+      const firstChoice = choices[0];
+      if (!firstChoice || typeof firstChoice !== 'object') {
+        return undefined;
+      }
 
-    return undefined;
+      const message = firstChoice.message;
+      if (!message || typeof message !== 'object') {
+        return undefined;
+      }
+
+      const content = message.content;
+      if (typeof content === 'string') {
+        return content;
+      }
+
+      if (!Array.isArray(content)) {
+        return undefined;
+      }
+
+      const textParts: string[] = [];
+      for (const part of content) {
+        if (!part || typeof part !== 'object') {
+          return undefined;
+        }
+
+        if (typeof part.text === 'string' && part.text) {
+          textParts.push(part.text);
+        }
+      }
+
+      return textParts.length > 0 ? textParts.join('\n') : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private extractUsageMetadata(response: OpenAICompatibleChatResponse | undefined): RecognitionUsageMetadata | undefined {
+    try {
+      const metadata: RecognitionUsageMetadata = {};
+      let hasMetadata = false;
+      const setString = (key: 'responseId' | 'responseModel', value: unknown): void => {
+        if (typeof value === 'string') {
+          metadata[key] = value;
+          hasMetadata = true;
+        }
+      };
+      const setCounter = (
+        key: Exclude<keyof RecognitionUsageMetadata, 'responseId' | 'responseModel'>,
+        value: unknown
+      ): void => {
+        if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+          metadata[key] = value;
+          hasMetadata = true;
+        }
+      };
+
+      setString('responseId', readUntrustedProperty(response, 'id'));
+      setString('responseModel', readUntrustedProperty(response, 'model'));
+
+      const usage = readUntrustedProperty(response, 'usage');
+      setCounter('promptTokens', readUntrustedProperty(usage, 'prompt_tokens'));
+      setCounter('completionTokens', readUntrustedProperty(usage, 'completion_tokens'));
+      setCounter('totalTokens', readUntrustedProperty(usage, 'total_tokens'));
+
+      const promptTokenDetails = readUntrustedProperty(usage, 'prompt_tokens_details');
+      setCounter('cachedTokens', readUntrustedProperty(promptTokenDetails, 'cached_tokens'));
+      setCounter('cacheWriteTokens', readUntrustedProperty(promptTokenDetails, 'cache_write_tokens'));
+      setCounter('imageTokens', readUntrustedProperty(promptTokenDetails, 'image_tokens'));
+      setCounter('audioTokens', readUntrustedProperty(promptTokenDetails, 'audio_tokens'));
+      setCounter('videoTokens', readUntrustedProperty(promptTokenDetails, 'video_tokens'));
+
+      return hasMetadata ? metadata : undefined;
+    } catch {
+      // Telemetry is optional. Unexpected provider payload shapes must never
+      // turn a valid assistant response into a recognition failure.
+      return undefined;
+    }
   }
 
   private extractErrorMessage(response: OpenAICompatibleChatResponse | undefined, responseText: string): string {
-    const message = response?.error?.message || responseText;
-    return message.length > 1000 ? `${message.slice(0, 1000)}...` : message;
+    const error = readUntrustedProperty(response, 'error');
+    const message = readUntrustedProperty(error, 'message');
+    const errorText = typeof message === 'string' ? message : responseText;
+    return errorText.length > 1000 ? `${errorText.slice(0, 1000)}...` : errorText;
+  }
+}
+
+function readUntrustedProperty(value: unknown, property: string): unknown {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
+    return undefined;
+  }
+
+  try {
+    return (value as Record<string, unknown>)[property];
+  } catch {
+    return undefined;
   }
 }
 

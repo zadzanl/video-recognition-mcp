@@ -6,7 +6,8 @@ import * as os from 'node:os';
 import { createRecognitionProvider } from '../services/recognition-providers.js';
 import type {
   OpenAICompatibleRecognitionConfig,
-  RecognitionProvider
+  RecognitionProvider,
+  RecognitionResult
 } from '../types/index.js';
 
 interface CapturedFetchCall {
@@ -54,6 +55,13 @@ interface CapturedRequestBody {
 type TestRecognitionProvider = RecognitionProvider & {
   synthesizeText: NonNullable<RecognitionProvider['synthesizeText']>;
 };
+
+interface OpenAICompatibleFailureOrigin {
+  kind: 'http' | 'transport' | 'local' | 'structural';
+  stage?: 'fetch' | 'response-read' | 'validation' | 'encoding' | 'request-build' | 'unsupported-response-shape';
+  status?: number;
+  error?: unknown;
+}
 
 let tmpDir: string;
 let imagePath: string;
@@ -229,6 +237,137 @@ describe('OpenAI-compatible text synthesis request bodies', () => {
   });
 });
 
+describe('OpenAI-compatible usage telemetry', () => {
+  it('leaves usage absent when the provider omits it for recognition and synthesis', async () => {
+    const provider = makeProvider();
+    global.fetch = async (): Promise<Response> => successResponse({
+      choices: [{ message: { content: 'successful assistant text' } }]
+    });
+
+    const recognition = await provider.recognize({
+      filepath: imagePath,
+      prompt: 'Recognize this image.',
+      mediaKind: 'image'
+    });
+    const synthesis = await provider.synthesizeText('Synthesize this text.');
+
+    assert.deepStrictEqual(recognition, { text: 'successful assistant text' });
+    assert.deepStrictEqual(synthesis, { text: 'successful assistant text' });
+  });
+
+  it('keeps valid assistant text when usage or prompt token details are null', async () => {
+    const provider = makeProvider();
+    const responses = [
+      { choices: [{ message: { content: 'usage null' } }], usage: null },
+      {
+        choices: [{ message: { content: 'details null' } }],
+        usage: { prompt_tokens_details: null }
+      }
+    ];
+    global.fetch = async (): Promise<Response> => successResponse(responses.shift());
+
+    assert.deepStrictEqual(await provider.synthesizeText('First prompt.'), { text: 'usage null' });
+    assert.deepStrictEqual(await provider.synthesizeText('Second prompt.'), { text: 'details null' });
+  });
+
+  it('preserves explicit zero token counters', async () => {
+    const provider = makeProvider();
+    global.fetch = async (): Promise<Response> => successResponse({
+      id: 'response-zero',
+      model: 'provider-model',
+      choices: [{ message: { content: 'zero counters' } }],
+      usage: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        prompt_tokens_details: {
+          cached_tokens: 0,
+          cache_write_tokens: 0,
+          image_tokens: 0,
+          audio_tokens: 0,
+          video_tokens: 0
+        }
+      }
+    });
+
+    const result = await provider.synthesizeText('Prompt with zero counters.');
+
+    assert.deepStrictEqual(result, {
+      text: 'zero counters',
+      usage: {
+        responseId: 'response-zero',
+        responseModel: 'provider-model',
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        cachedTokens: 0,
+        cacheWriteTokens: 0,
+        imageTokens: 0,
+        audioTokens: 0,
+        videoTokens: 0
+      }
+    });
+  });
+
+  it('retains valid usage siblings while rejecting malformed counters and raw payload fields', async () => {
+    const provider = makeProvider();
+    global.fetch = async (): Promise<Response> => successResponse({
+      id: 'response-positive',
+      model: 'provider-model',
+      api_key: 'secret-provider-key',
+      session_id: 'provider-session-id',
+      headers: { authorization: 'Bearer secret-token' },
+      choices: [{ message: { content: 'mixed telemetry remains successful' } }],
+      usage: {
+        prompt_tokens: 12,
+        completion_tokens: '3',
+        total_tokens: -1,
+        prompt_tokens_details: {
+          cached_tokens: 7,
+          cache_write_tokens: 5,
+          image_tokens: 2,
+          audio_tokens: 3,
+          video_tokens: 4,
+          ignored: 'payload'
+        }
+      }
+    });
+
+    const result = await provider.synthesizeText('Prompt with mixed telemetry.');
+
+    assert.deepStrictEqual(result, {
+      text: 'mixed telemetry remains successful',
+      usage: {
+        responseId: 'response-positive',
+        responseModel: 'provider-model',
+        promptTokens: 12,
+        cachedTokens: 7,
+        cacheWriteTokens: 5,
+        imageTokens: 2,
+        audioTokens: 3,
+        videoTokens: 4
+      }
+    });
+    assert.ok(!JSON.stringify(result).includes('secret'));
+    assert.ok(!JSON.stringify(result).includes('session_id'));
+    assert.ok(!JSON.stringify(result).includes('headers'));
+  });
+
+  it('keeps valid assistant text when telemetry shapes are malformed', async () => {
+    const provider = makeProvider();
+    global.fetch = async (): Promise<Response> => successResponse({
+      id: ['not-an-id'],
+      model: 42,
+      choices: [{ message: { content: 'assistant text is authoritative' } }],
+      usage: ['not-an-object']
+    });
+
+    assert.deepStrictEqual(await provider.synthesizeText('Prompt with malformed telemetry.'), {
+      text: 'assistant text is authoritative'
+    });
+  });
+});
+
 describe('OpenAI-compatible OpenRouter response cache header', () => {
   for (const testCase of [
     {
@@ -308,6 +447,152 @@ describe('OpenAI-compatible error sanitization', () => {
   });
 });
 
+describe('OpenAI-compatible failure origins', () => {
+  it('tags fetch failures with the original error and keeps the origin private', async () => {
+    const provider = makeProvider();
+    const fetchError = new Error('connection reset');
+    global.fetch = async (): Promise<Response> => {
+      throw fetchError;
+    };
+
+    const result = await provider.synthesizeText('Prompt that cannot be sent.');
+    const origin = expectFailureOrigin(result);
+
+    assert.strictEqual(origin.error, fetchError);
+    assert.deepStrictEqual(origin, {
+      kind: 'transport',
+      stage: 'fetch',
+      error: fetchError
+    });
+  });
+
+  it('tags response-read failures with the response status and original error', async () => {
+    const provider = makeProvider();
+    const responseReadError = new Error('body stream failed');
+    global.fetch = async (): Promise<Response> => ({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable',
+      text: async (): Promise<string> => {
+        throw responseReadError;
+      }
+    } as Response);
+
+    const result = await provider.synthesizeText('Prompt with unreadable response.');
+    const origin = expectFailureOrigin(result);
+
+    assert.strictEqual(origin.error, responseReadError);
+    assert.deepStrictEqual(origin, {
+      kind: 'transport',
+      stage: 'response-read',
+      status: 503,
+      error: responseReadError
+    });
+  });
+
+  it('tags readable non-OK responses as HTTP failures', async () => {
+    const provider = makeProvider();
+    global.fetch = async (): Promise<Response> => new Response(
+      JSON.stringify({ error: { message: 'upstream rejected request' } }),
+      { status: 429, statusText: 'Too Many Requests' }
+    );
+
+    const result = await provider.synthesizeText('Prompt with HTTP failure.');
+    const origin = expectFailureOrigin(result);
+
+    assert.deepStrictEqual(origin, { kind: 'http', status: 429 });
+  });
+
+  it('tags local validation and encoding failures before fetch', async () => {
+    const validationProvider = makeProvider();
+    let fetchCalled = false;
+    global.fetch = async (): Promise<Response> => {
+      fetchCalled = true;
+      throw new Error('fetch must not be called for local failures');
+    };
+
+    const validationResult = await validationProvider.recognize({
+      filepath: path.join(tmpDir, 'missing.png'),
+      prompt: 'Validate this missing file.',
+      mediaKind: 'image'
+    });
+    const validationOrigin = expectFailureOrigin(validationResult);
+    assert.strictEqual(validationOrigin.kind, 'local');
+    assert.strictEqual(validationOrigin.stage, 'validation');
+    assert.ok(validationOrigin.error instanceof Error);
+
+    const encodingProvider = makeProvider({ maxInlineMediaBytes: 1 });
+    const encodingResult = await encodingProvider.recognize({
+      filepath: imagePath,
+      prompt: 'Encode this image.',
+      mediaKind: 'image'
+    });
+    const encodingOrigin = expectFailureOrigin(encodingResult);
+    assert.strictEqual(encodingOrigin.kind, 'local');
+    assert.strictEqual(encodingOrigin.stage, 'encoding');
+    assert.ok(encodingOrigin.error instanceof Error);
+    assert.strictEqual(fetchCalled, false);
+  });
+
+  it('tags local request-build failures with the original error', async () => {
+    const requestBuildError = new Error('api key coercion failed');
+    const apiKey = {
+      [Symbol.toPrimitive](): never {
+        throw requestBuildError;
+      }
+    } as unknown as string;
+    const provider = makeProvider({ apiKey });
+
+    const result = await provider.synthesizeText('Prompt with invalid request configuration.');
+    const origin = expectFailureOrigin(result);
+
+    assert.strictEqual(origin.error, requestBuildError);
+    assert.deepStrictEqual(origin, {
+      kind: 'local',
+      stage: 'request-build',
+      error: requestBuildError
+    });
+  });
+
+  it('tags malformed 2xx responses as structural failures and leaves successes untagged', async () => {
+    const provider = makeProvider();
+    global.fetch = async (): Promise<Response> => new Response(
+      JSON.stringify({ choices: [] }),
+      { status: 200, statusText: 'OK' }
+    );
+
+    const malformedResult = await provider.synthesizeText('Prompt with malformed response.');
+    const malformedOrigin = expectFailureOrigin(malformedResult);
+    assert.deepStrictEqual(malformedOrigin, {
+      kind: 'structural',
+      stage: 'unsupported-response-shape'
+    });
+
+    const calls: CapturedFetchCall[] = [];
+    stubFetch(calls);
+    const successResult = await provider.synthesizeText('Prompt with valid response.');
+    assert.strictEqual(successResult.isError, undefined);
+    assert.deepStrictEqual(Object.getOwnPropertySymbols(successResult), []);
+  });
+
+  it('treats malformed choice content parts as structural failures instead of throwing', async () => {
+    const provider = makeProvider();
+    global.fetch = async (): Promise<Response> => new Response(
+      JSON.stringify({ choices: [{ message: { content: [null] } }] }),
+      { status: 200, statusText: 'OK' }
+    );
+
+    const result = await provider.synthesizeText('Prompt with hostile malformed response.');
+
+    assert.strictEqual(result.isError, true);
+    assert.match(result.text, /unsupported or empty text synthesis response shape/);
+    assert.deepStrictEqual(expectFailureOrigin(result), {
+      kind: 'structural',
+      stage: 'unsupported-response-shape'
+    });
+  });
+});
+
 function makeProvider(overrides: Partial<OpenAICompatibleRecognitionConfig> = {}): TestRecognitionProvider {
   const provider = createRecognitionProvider({
     provider: 'openai-compatible',
@@ -318,6 +603,7 @@ function makeProvider(overrides: Partial<OpenAICompatibleRecognitionConfig> = {}
     maxInlineMediaBytes: 1024 * 1024,
     parallelInference: {
       enabled: false,
+      dispatchMode: 'concurrent',
       promptCount: 1,
       aggregation: 'all_return',
       promptTemplates: [],
@@ -347,8 +633,29 @@ function expectContentPart<TType extends CapturedMessageContentPart['type']>(
   return part as Extract<CapturedMessageContentPart, { type: TType }>;
 }
 
+function expectFailureOrigin(result: RecognitionResult): OpenAICompatibleFailureOrigin {
+  assert.strictEqual(result.isError, true);
+  const symbols = Object.getOwnPropertySymbols(result);
+  assert.strictEqual(symbols.length, 1);
+
+  const descriptor = Object.getOwnPropertyDescriptor(result, symbols[0]);
+  assert.ok(descriptor);
+  assert.strictEqual(descriptor.enumerable, false);
+  assert.strictEqual(descriptor.writable, false);
+  assert.strictEqual(descriptor.configurable, false);
+  assert.deepStrictEqual(Object.keys(result), ['text', 'isError']);
+  assert.deepStrictEqual({ ...result }, { text: result.text, isError: true });
+  assert.strictEqual(JSON.stringify(result), JSON.stringify({ text: result.text, isError: true }));
+
+  return descriptor.value as OpenAICompatibleFailureOrigin;
+}
+
 function parseRequestBody(body: BodyInit | null | undefined): CapturedRequestBody {
   return JSON.parse(String(body)) as CapturedRequestBody;
+}
+
+function successResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, statusText: 'OK' });
 }
 
 function stubFetch(calls: CapturedFetchCall[]): void {
