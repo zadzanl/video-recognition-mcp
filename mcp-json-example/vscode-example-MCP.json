@@ -21,7 +21,7 @@
         "OPENAI_COMPATIBLE_MODEL": "xiaomi/mimo-v2.5",
         "OPENAI_COMPATIBLE_PROVIDER_LABEL": "OpenRouter",
         "PARALLEL_PROMPTS": "1",
-        "PARALLEL_AGGREGATION": "all_return",
+        "PARALLEL_AGGREGATION": "llm_merge",
         "LOG_LEVEL": "fatal"
       }
     }

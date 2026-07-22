@@ -35,5 +35,5 @@ Thumbs.db
 
 # Local only stuffs
 # added to global git exclude instead
-# openspec/
-# media_examples/
+openspec/
+media_examples/
