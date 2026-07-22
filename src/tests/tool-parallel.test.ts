@@ -206,6 +206,7 @@ describe('recognition tool parallel integration', () => {
 function makeConfig(overrides: Partial<ParallelInferenceConfig> = {}): ParallelInferenceConfig {
   return {
     enabled: true,
+    dispatchMode: 'concurrent',
     promptCount: 3,
     aggregation: 'header_merge',
     promptTemplates: [

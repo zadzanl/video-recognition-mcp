@@ -359,6 +359,7 @@ function makeRecognitionConfig(): ResolvedRecognitionConfig {
 function makeParallelConfig(): ParallelInferenceConfig {
   return {
     enabled: false,
+    dispatchMode: 'concurrent',
     promptCount: 1,
     aggregation: 'all_return',
     promptTemplates: [

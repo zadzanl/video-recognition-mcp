@@ -2,7 +2,7 @@
  * Recognition provider configuration and safe provider resolution.
  */
 
-import type { ResolvedRecognitionConfig, RecognitionProviderName, ParallelInferenceConfig, PromptTemplate, ParallelAggregationMode, OpenRouterResponseCacheConfig } from '../types/index.js';
+import type { ResolvedRecognitionConfig, RecognitionProviderName, ParallelInferenceConfig, PromptTemplate, ParallelAggregationMode, ParallelDispatchMode, OpenRouterResponseCacheConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import * as fs from 'node:fs';
 
@@ -269,6 +269,19 @@ export function parseParallelAggregation(raw: string | undefined): ParallelAggre
   throw new Error(`PARALLEL_AGGREGATION is case-sensitive and must be exactly one of: all_return, header_merge, llm_merge (received: "${raw}")`);
 }
 
+export function parseParallelDispatchMode(raw: string | undefined): ParallelDispatchMode {
+  if (raw === undefined || raw.trim() === '') {
+    return 'concurrent';
+  }
+
+  const value = raw.trim();
+  if (value === 'concurrent' || value === 'lead_then_fan_out') {
+    return value;
+  }
+
+  throw new Error(`PARALLEL_DISPATCH_MODE is case-sensitive and must be exactly one of: concurrent, lead_then_fan_out (received: "${raw}")`);
+}
+
 export interface PromptTemplatesFile {
   templates?: { name?: string; suffix?: string }[];
   headerMergeTemplate?: string;
@@ -354,10 +367,12 @@ export function loadPromptTemplates(configPath = 'config/prompt-templates.json')
 export function buildParallelInferenceConfig(env: NodeJS.ProcessEnv = process.env): ParallelInferenceConfig {
   const promptCount = parseParallelPrompts(readEnv(env, 'PARALLEL_PROMPTS'));
   const aggregation = parseParallelAggregation(readEnv(env, 'PARALLEL_AGGREGATION'));
+  const dispatchMode = parseParallelDispatchMode(readEnv(env, 'PARALLEL_DISPATCH_MODE'));
   const { templates, headerMergeTemplate, llmMergePrompt } = loadPromptTemplates();
 
   return {
     enabled: promptCount > 1,
+    dispatchMode,
     promptCount,
     aggregation,
     promptTemplates: templates.slice(0, Math.max(promptCount, 1)),

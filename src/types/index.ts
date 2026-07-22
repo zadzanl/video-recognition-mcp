@@ -80,9 +80,26 @@ export interface ProviderCallOptions {
   promptLayout?: PromptLayoutMetadata;
 }
 
+/**
+ * Best-effort, provider-neutral token and response metadata from a successful recognition call.
+ */
+export interface RecognitionUsageMetadata {
+  responseId?: string;
+  responseModel?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  cachedTokens?: number;
+  cacheWriteTokens?: number;
+  imageTokens?: number;
+  audioTokens?: number;
+  videoTokens?: number;
+}
+
 export interface RecognitionResult {
   text: string;
   isError?: boolean;
+  usage?: RecognitionUsageMetadata;
 }
 
 export interface RecognitionProvider {
@@ -97,6 +114,8 @@ export interface RecognitionProvider {
  */
 export type ParallelAggregationMode = 'all_return' | 'header_merge' | 'llm_merge';
 
+export type ParallelDispatchMode = 'concurrent' | 'lead_then_fan_out';
+
 export interface PromptTemplate {
   name: string;
   suffix: string;
@@ -104,6 +123,7 @@ export interface PromptTemplate {
 
 export interface ParallelInferenceConfig {
   enabled: boolean;
+  dispatchMode: ParallelDispatchMode;
   promptCount: number;
   aggregation: ParallelAggregationMode;
   promptTemplates: PromptTemplate[];

@@ -23,6 +23,7 @@ const baseRequest: RecognitionRequest = {
 function makeConfig(overrides: Partial<ParallelInferenceConfig> = {}): ParallelInferenceConfig {
   return {
     enabled: true,
+    dispatchMode: 'concurrent',
     promptCount: 3,
     aggregation: 'all_return',
     promptTemplates: [

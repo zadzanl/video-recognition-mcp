@@ -22,6 +22,7 @@ import {
   parseOpenRouterResponseCache,
   parseParallelPrompts,
   parseParallelAggregation,
+  parseParallelDispatchMode,
   loadPromptTemplates,
   buildParallelInferenceConfig,
   BUILT_IN_PROMPT_TEMPLATES,
@@ -589,6 +590,48 @@ describe('parseParallelAggregation', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Parallel dispatch mode parsing
+// ---------------------------------------------------------------------------
+
+describe('parseParallelDispatchMode', () => {
+  it('defaults to concurrent when undefined', () => {
+    assert.strictEqual(parseParallelDispatchMode(undefined), 'concurrent');
+  });
+
+  it('defaults to concurrent when empty string', () => {
+    assert.strictEqual(parseParallelDispatchMode(''), 'concurrent');
+  });
+
+  it('defaults to concurrent when whitespace', () => {
+    assert.strictEqual(parseParallelDispatchMode('   '), 'concurrent');
+  });
+
+  it('accepts concurrent', () => {
+    assert.strictEqual(parseParallelDispatchMode('concurrent'), 'concurrent');
+  });
+
+  it('accepts lead_then_fan_out', () => {
+    assert.strictEqual(parseParallelDispatchMode('lead_then_fan_out'), 'lead_then_fan_out');
+  });
+
+  it('rejects mixed-case values because dispatch modes are case-sensitive', () => {
+    assert.throws(
+      () => parseParallelDispatchMode('Concurrent'),
+      /PARALLEL_DISPATCH_MODE is case-sensitive and must be exactly one of: concurrent, lead_then_fan_out/
+    );
+  });
+
+  it('rejects aliases and unknown values with accepted modes', () => {
+    for (const value of ['lead-then-fan-out', 'unknown_mode']) {
+      assert.throws(
+        () => parseParallelDispatchMode(value),
+        /PARALLEL_DISPATCH_MODE is case-sensitive and must be exactly one of: concurrent, lead_then_fan_out/
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Template loading
 // ---------------------------------------------------------------------------
 
@@ -697,6 +740,7 @@ describe('buildParallelInferenceConfig', () => {
   it('returns disabled when env omitted', () => {
     const config = buildParallelInferenceConfig({});
     assert.strictEqual(config.enabled, false);
+    assert.strictEqual(config.dispatchMode, 'concurrent');
     assert.strictEqual(config.promptCount, 1);
     assert.strictEqual(config.aggregation, 'all_return');
     assert.ok(config.promptTemplates.length >= 1);
@@ -705,8 +749,13 @@ describe('buildParallelInferenceConfig', () => {
   });
 
   it('returns enabled with correct count when env set to 3', () => {
-    const config = buildParallelInferenceConfig({ PARALLEL_PROMPTS: '3', PARALLEL_AGGREGATION: 'header_merge' });
+    const config = buildParallelInferenceConfig({
+      PARALLEL_PROMPTS: '3',
+      PARALLEL_AGGREGATION: 'header_merge',
+      PARALLEL_DISPATCH_MODE: 'lead_then_fan_out'
+    });
     assert.strictEqual(config.enabled, true);
+    assert.strictEqual(config.dispatchMode, 'lead_then_fan_out');
     assert.strictEqual(config.promptCount, 3);
     assert.strictEqual(config.aggregation, 'header_merge');
     assert.strictEqual(config.promptTemplates.length, 3);
@@ -728,11 +777,13 @@ describe('loadRecognitionConfig parallel inference', () => {
     const config = loadRecognitionConfig({
       GOOGLE_API_KEY: 'test-key',
       PARALLEL_PROMPTS: '4',
-      PARALLEL_AGGREGATION: 'llm_merge'
+      PARALLEL_AGGREGATION: 'llm_merge',
+      PARALLEL_DISPATCH_MODE: 'lead_then_fan_out'
     });
     assert.strictEqual(config.provider, 'gemini');
     if (config.provider === 'gemini') {
       assert.strictEqual(config.parallelInference.enabled, true);
+      assert.strictEqual(config.parallelInference.dispatchMode, 'lead_then_fan_out');
       assert.strictEqual(config.parallelInference.promptCount, 4);
       assert.strictEqual(config.parallelInference.aggregation, 'llm_merge');
       assert.strictEqual(config.parallelInference.promptTemplates.length, 4);
@@ -746,11 +797,13 @@ describe('loadRecognitionConfig parallel inference', () => {
       OPENAI_COMPATIBLE_BASE_URL: 'https://api.example.com/v1',
       OPENAI_COMPATIBLE_MODEL: 'gpt-4o',
       PARALLEL_PROMPTS: '2',
-      PARALLEL_AGGREGATION: 'header_merge'
+      PARALLEL_AGGREGATION: 'header_merge',
+      PARALLEL_DISPATCH_MODE: 'concurrent'
     });
     assert.strictEqual(config.provider, 'openai-compatible');
     if (config.provider === 'openai-compatible') {
       assert.strictEqual(config.parallelInference.enabled, true);
+      assert.strictEqual(config.parallelInference.dispatchMode, 'concurrent');
       assert.strictEqual(config.parallelInference.promptCount, 2);
       assert.strictEqual(config.parallelInference.aggregation, 'header_merge');
       assert.strictEqual(config.parallelInference.promptTemplates.length, 2);
@@ -784,6 +837,7 @@ describe('loadRecognitionConfig parallel inference', () => {
     assert.strictEqual(config.provider, 'gemini');
     if (config.provider === 'gemini') {
       assert.strictEqual(config.parallelInference.enabled, false);
+      assert.strictEqual(config.parallelInference.dispatchMode, 'concurrent');
       assert.strictEqual(config.parallelInference.promptCount, 1);
       assert.strictEqual(config.parallelInference.aggregation, 'all_return');
     }
