@@ -21,7 +21,7 @@
     "dev": "tsc -w & node --watch dist/index.js",
     "debug": "tsc & npx @modelcontextprotocol/inspector node dist/index.js",
     "lint": "eslint src",
-    "test": "tsc && node --test dist/tests/logger.test.js dist/tests/provider-config.test.js dist/tests/fallback.test.js dist/tests/routing.test.js dist/tests/parallel-dispatcher.test.js dist/tests/tool-parallel.test.js dist/tests/openai-compatible-provider.test.js dist/tests/server-transport.test.js"
+    "test": "tsc && node --test dist/tests/logger.test.js dist/tests/provider-config.test.js dist/tests/fallback.test.js dist/tests/routing.test.js dist/tests/parallel-dispatcher.test.js dist/tests/tool-parallel.test.js dist/tests/openai-compatible-provider.test.js dist/tests/server-transport.test.js dist/tests/media.test.js"
   },
   "keywords": [
     "mcp",

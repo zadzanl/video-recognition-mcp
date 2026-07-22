@@ -107,6 +107,8 @@ The server is configured using environment variables. Provider/model selection i
 | `MIMO_BASE_URL` | Optional. Base URL for MiMo API (default: `https://api.xiaomimimo.com/v1`). |
 | `RATE_LIMIT_MAX_WAIT_MS` | Optional. Maximum time (in milliseconds) the throttling queue will sleep and wait for rate-limiting slots before returning a timeout (default: `30000`). |
 | `RATE_LIMIT_TRACKER_PATH` | Optional. File path for the persistent rate-limit tracker state. Defaults to a temp file named `mcp-video-recognition-rate-limits.json`. |
+| `ALLOWED_MEDIA_ROOTS` | Optional. Platform-delimited list of directories that local media files must stay under after canonical real-path resolution. Use semicolon on Windows and colon on macOS/Linux. |
+| `MEDIA_ROOTS` | Optional alias for `ALLOWED_MEDIA_ROOTS`. If both are set, media validation fails with an ambiguity error; use `ALLOWED_MEDIA_ROOTS` only. |
 | `PARALLEL_PROMPTS` | Optional integer from `1` to `8`. Defaults to `1`; `1` disables parallel dispatch and preserves baseline single-call behavior. |
 | `PARALLEL_AGGREGATION` | Optional case-sensitive aggregation mode. Exact values: `all_return`, `header_merge`, `llm_merge`. Defaults to `all_return`. |
 
@@ -116,6 +118,24 @@ Provider resolution is intentionally conservative:
 - If `RECOGNITION_PROVIDER` is omitted and only `GOOGLE_API_KEY` is configured, Gemini is used.
 - If `RECOGNITION_PROVIDER` is omitted, `GOOGLE_API_KEY` is absent, and a complete OpenAI-compatible config is present, OpenAI-compatible mode is used.
 - If both Gemini and OpenAI-compatible config are present and `RECOGNITION_PROVIDER` is omitted, startup fails and asks you to set `RECOGNITION_PROVIDER` explicitly.
+
+### Local Media Path Confinement
+
+By default, MCP tools accept any local file path that the server process can read. To confine media access, set `ALLOWED_MEDIA_ROOTS` to one or more directories before starting the server. Separate multiple roots with the platform path delimiter: semicolon (`;`) on Windows, colon (`:`) on macOS/Linux.
+
+When configured, the server resolves both allowed roots and requested files through canonical real paths. Files outside those roots are rejected before provider upload or inline encoding, including symlinks or junctions inside an allowed root that point outside it. `MEDIA_ROOTS` is accepted as an alias for compatibility, but setting both variables is treated as ambiguous and media validation fails. Use `ALLOWED_MEDIA_ROOTS` when possible.
+
+Example on Windows:
+
+```bash
+ALLOWED_MEDIA_ROOTS=C:/Users/you/media;D:/shared-media
+```
+
+Example on macOS/Linux:
+
+```bash
+ALLOWED_MEDIA_ROOTS=/home/you/media:/mnt/shared-media
+```
 
 ### Gemini Model Fallback
 
@@ -391,7 +411,7 @@ GOOGLE_API_KEY=your_api_key npm run dev
 
 ## Security & Privacy
 
-- **Local file access:** Tools accept arbitrary file paths. The server reads any file the process can access and sends it to the configured provider. Only expose this server to trusted MCP clients.
+- **Local file access:** By default, tools accept arbitrary file paths. The server reads any file the process can access and sends it to the configured provider. Set `ALLOWED_MEDIA_ROOTS` to restrict media files to approved directories after canonical real-path resolution. Symlink and junction escapes outside those roots are rejected. Only expose this server to trusted MCP clients.
 - **Gemini data transport:** Gemini mode uploads media files to Google's Gemini API servers for processing. Review [Google's Gemini API data governance](https://ai.google.dev/gemini-api/docs/data-governance) for retention and usage policies.
 - **OpenAI-compatible data transport:** OpenAI-compatible mode embeds image/video files as base64 data URLs and audio files as raw base64 `input_audio` content parts in `/chat/completions` request bodies. This can increase payload size by roughly one third before HTTP overhead and sends the full media file to the configured provider endpoint.
 - **API keys:** `GOOGLE_API_KEY` and `OPENAI_COMPATIBLE_API_KEY` authenticate provider requests. Do not commit them or expose them in logs.
