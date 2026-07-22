@@ -48,6 +48,22 @@
       "Short_limit_token_cap": 100000,
       "Long_limit_token_cap": 500000
     },
+    "openai/gpt-4o-mini": {
+      "Short_limit_duration_in_seconds": 60,
+      "Long_limit_duration_in_seconds": 86400,
+      "Short_limit_request_cap": 5,
+      "Long_limit_request_cap": 20,
+      "Short_limit_token_cap": 100000,
+      "Long_limit_token_cap": 500000
+    },
+    "mimo-v2.5": {
+      "Short_limit_duration_in_seconds": 60,
+      "Long_limit_duration_in_seconds": 86400,
+      "Short_limit_request_cap": 10,
+      "Long_limit_request_cap": 50,
+      "Short_limit_token_cap": 200000,
+      "Long_limit_token_cap": 1000000
+    },
     "xiaomi/mimo-v2.5": {
       "Short_limit_duration_in_seconds": 60,
       "Long_limit_duration_in_seconds": 86400,

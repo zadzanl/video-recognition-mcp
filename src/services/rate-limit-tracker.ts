@@ -37,6 +37,24 @@ export interface RateLimitTrackerState {
   models: Record<string, ModelRateState>;
 }
 
+type ParsedRecord = Record<string, unknown>;
+
+function isRecordLike(value: unknown): value is ParsedRecord {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function createNullPrototypeRecord<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
+function normalizeOwnStringKeys<T>(record: ParsedRecord): Record<string, T> {
+  const normalized = createNullPrototypeRecord<T>();
+  for (const key of Object.keys(record)) {
+    normalized[key] = record[key] as T;
+  }
+  return normalized;
+}
+
 const DEFAULT_RULE: ThrottlingRule = {
   Short_limit_duration_in_seconds: 60,
   Long_limit_duration_in_seconds: 86400,
@@ -49,12 +67,13 @@ const DEFAULT_RULE: ThrottlingRule = {
 export class RateLimitTracker {
   private readonly stateFilePath: string;
   private readonly limitsFilePath: string;
-  private limits: ThrottlingLimitsConfig = { models: {} };
+  private readonly warnedModels = new Set<string>();
+  private limits: ThrottlingLimitsConfig = { models: createNullPrototypeRecord<ThrottlingRule>() };
 
-  constructor() {
+  constructor(customLimitsPath?: string) {
     const envPath = process.env.RATE_LIMIT_TRACKER_PATH;
     this.stateFilePath = envPath ? envPath : path.join(os.tmpdir(), 'mcp-video-recognition-rate-limits.json');
-    this.limitsFilePath = path.join(process.cwd(), 'config', 'throttling-limits.json');
+    this.limitsFilePath = customLimitsPath ?? path.join(process.cwd(), 'config', 'throttling-limits.json');
     this.loadLimits();
   }
 
@@ -65,9 +84,9 @@ export class RateLimitTracker {
     try {
       if (fs.existsSync(this.limitsFilePath)) {
         const raw = fs.readFileSync(this.limitsFilePath, 'utf8');
-        const parsed = JSON.parse(raw) as ThrottlingLimitsConfig;
-        if (parsed && typeof parsed.models === 'object') {
-          this.limits = parsed;
+        const parsed: unknown = JSON.parse(raw);
+        if (isRecordLike(parsed) && Object.hasOwn(parsed, 'models') && isRecordLike(parsed.models)) {
+          this.limits = { models: normalizeOwnStringKeys<ThrottlingRule>(parsed.models) };
           log.info(`Loaded throttling limits config from ${this.limitsFilePath}`);
           return;
         }
@@ -82,16 +101,16 @@ export class RateLimitTracker {
    * Get limits configuration for a model
    */
   public getLimitsForModel(modelName: string): ThrottlingRule {
-    // If exact model match is not found, try to see if it starts with the key (e.g. 'google/gemini-2.5-flash' vs 'gemini-3.5-flash')
-    if (this.limits.models[modelName]) {
-      return this.limits.models[modelName];
+    const configuredRule = Object.hasOwn(this.limits.models, modelName)
+      ? this.limits.models[modelName]
+      : undefined;
+    if (configuredRule) {
+      return configuredRule;
     }
     
-    // Fallback search
-    for (const key of Object.keys(this.limits.models)) {
-      if (modelName.includes(key) || key.includes(modelName)) {
-        return this.limits.models[key];
-      }
+    if (!this.warnedModels.has(modelName)) {
+      this.warnedModels.add(modelName);
+      log.warn(`No throttle config entry for model "${modelName}". Using DEFAULT_RULE.`);
     }
 
     return DEFAULT_RULE;
@@ -104,15 +123,15 @@ export class RateLimitTracker {
     try {
       if (fs.existsSync(this.stateFilePath)) {
         const raw = fs.readFileSync(this.stateFilePath, 'utf8');
-        const parsed = JSON.parse(raw) as RateLimitTrackerState;
-        if (parsed && typeof parsed.models === 'object') {
-          return parsed;
+        const parsed: unknown = JSON.parse(raw);
+        if (isRecordLike(parsed) && Object.hasOwn(parsed, 'models') && isRecordLike(parsed.models)) {
+          return { models: normalizeOwnStringKeys<ModelRateState>(parsed.models) };
         }
       }
     } catch (error) {
       log.warn(`Error reading rate-limit tracker state file, resetting state: ${error instanceof Error ? error.message : String(error)}`);
     }
-    return { models: {} };
+    return { models: createNullPrototypeRecord<ModelRateState>() };
   }
 
   /**
@@ -144,7 +163,9 @@ export class RateLimitTracker {
    */
   public isModelAvailable(modelName: string, tokensInRequest = 0): boolean {
     const state = this.readState();
-    const modelState = state.models[modelName];
+    const modelState = Object.hasOwn(state.models, modelName)
+      ? state.models[modelName]
+      : undefined;
     if (!modelState) {
       return true;
     }
@@ -199,15 +220,18 @@ export class RateLimitTracker {
    */
   public recordAttempt(modelName: string, tokensInRequest = 0): void {
     const state = this.readState();
-    if (!state.models[modelName]) {
-      state.models[modelName] = {
+    let modelState = Object.hasOwn(state.models, modelName)
+      ? state.models[modelName]
+      : undefined;
+    if (!modelState) {
+      modelState = {
         shortRequestTimestamps: [],
         longRequestTimestamps: [],
         cooldownUntil: 0
       };
+      state.models[modelName] = modelState;
     }
 
-    const modelState = state.models[modelName];
     const now = Date.now();
     const entry: RequestEntry = { timestamp: now, tokens: tokensInRequest };
 
@@ -228,15 +252,19 @@ export class RateLimitTracker {
    */
   public markCooldown(modelName: string, durationMs = 60000): void {
     const state = this.readState();
-    if (!state.models[modelName]) {
-      state.models[modelName] = {
+    let modelState = Object.hasOwn(state.models, modelName)
+      ? state.models[modelName]
+      : undefined;
+    if (!modelState) {
+      modelState = {
         shortRequestTimestamps: [],
         longRequestTimestamps: [],
         cooldownUntil: 0
       };
+      state.models[modelName] = modelState;
     }
 
-    state.models[modelName].cooldownUntil = Date.now() + durationMs;
+    modelState.cooldownUntil = Date.now() + durationMs;
     this.writeState(state);
     log.warn(`Model ${modelName} marked in cooldown for ${durationMs}ms`);
   }
@@ -246,8 +274,13 @@ export class RateLimitTracker {
    */
   public clearCooldown(modelName: string): void {
     const state = this.readState();
-    if (state.models[modelName]) {
-      state.models[modelName].cooldownUntil = 0;
+    if (Object.hasOwn(state.models, modelName)) {
+      const modelState = state.models[modelName];
+      if (!modelState) {
+        return;
+      }
+
+      modelState.cooldownUntil = 0;
       this.writeState(state);
       log.info(`Cleared cooldown for model ${modelName}`);
     }
@@ -257,7 +290,7 @@ export class RateLimitTracker {
    * Clear all tracker states (used for testing and resets)
    */
   public clearAll(): void {
-    this.writeState({ models: {} });
+    this.writeState({ models: createNullPrototypeRecord<ModelRateState>() });
     log.info('Cleared all rate-limit tracker states');
   }
 }
