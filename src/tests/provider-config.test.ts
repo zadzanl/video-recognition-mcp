@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: checkpoint-3-startup-configuration
+ * phase: task-2.7-evidence-closure
  * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-02
- * agent_notes: "Credential-free selected-only configuration matrix with temporary canonical roots."
- * insights: "The loader canonicalizes configured roots only and never starts providers or accesses requested media."
+ * last_modified: 2026-08-04
+ * agent_notes: "Credential-free selected-only configuration matrix with temporary canonical roots; task 2.7 added Gemini allowlist grammar and empty-list startup failure assertions."
+ * insights: "The loader canonicalizes configured roots only and never starts providers or accesses requested media. GEMINI_MODEL_ALLOWLIST and OPENAI_COMPATIBLE_MODEL_ALLOWLIST share the comma-list grammar (trim, drop empties, exact case, first-occurrence dedupe, present-but-empty startup failure)."
  */
 
 import assert from 'node:assert/strict';
@@ -279,6 +279,24 @@ test('aliases, identifiers, allowlists, and required fields fail safely', async 
     loadRecognitionProviderConfig(openAIEnvironment({ OPENAI_COMPATIBLE_MODEL_ALLOWLIST: ', ,\t' })),
     /OPENAI_COMPATIBLE_MODEL_ALLOWLIST/u
   );
+});
+
+test('Gemini model allowlist grammar trims, drops empties, is case-sensitive, dedupes by first occurrence', async () => {
+  const config = await loadRecognitionProviderConfig({
+    GOOGLE_API_KEY: 'google-secret',
+    GEMINI_MODEL_ALLOWLIST: ' Flash,flash,,Flash ,\tPro\t'
+  });
+  assert.equal(config.provider, 'gemini');
+  if (config.provider !== 'gemini') assert.fail('wrong provider branch');
+  assert.deepEqual(config.modelAllowlist, ['Flash', 'flash', 'Pro']);
+});
+
+test('Gemini model allowlist with no non-empty entry fails startup naming the variable', async () => {
+  const message = await rejectionMessage({
+    GOOGLE_API_KEY: 'google-secret',
+    GEMINI_MODEL_ALLOWLIST: ' , ,\t'
+  });
+  assert.match(message, /GEMINI_MODEL_ALLOWLIST/u);
 });
 
 test('allowed roots use path delimiter and require existing directories without requested-file access', async () => {

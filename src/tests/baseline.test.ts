@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: checkpoint-3-activated-characterization
+ * phase: task-2.7-evidence-closure
  * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-02
- * agent_notes: "Characterizes tool contracts and checkpoint-3 default ownership through credential-free fakes."
- * insights: "Schema supplies the prompt default; omitted model reaches GeminiService as undefined."
+ * last_modified: 2026-08-04
+ * agent_notes: "Characterizes tool contracts and checkpoint-3 default ownership through credential-free fakes; task 2.7 added per-tool args.modelname direct-forwarding assertions."
+ * insights: "Schema supplies the prompt default; omitted model reaches GeminiService as undefined. Every image/audio/video tool forwards explicit args.modelname verbatim and omission as undefined with no production fallback."
  */
 
 import assert from 'node:assert/strict';
@@ -131,6 +131,24 @@ test('tools forward schema prompt default and omitted model without local fallba
     assert.equal(calls.processed.length, 1);
     assert.equal(calls.processed[0]?.prompt, 'Describe this content');
     assert.equal(calls.processed[0]?.modelName, undefined);
+  }
+});
+
+test('tools forward args.modelname directly, explicit verbatim and omitted as undefined', async () => {
+  for (const [index, toolCase] of toolCases.entries()) {
+    const explicitPath = join(temporaryDirectory, `modelname-explicit-${index}${toolCase.extension}`);
+    const omittedPath = join(temporaryDirectory, `modelname-omitted-${index}${toolCase.extension}`);
+    await writeFile(explicitPath, 'fixture');
+    await writeFile(omittedPath, 'fixture');
+    const { service, calls } = createFakeService();
+    const tool = toolCase.createTool(service);
+
+    await tool.callback(tool.inputSchema.parse({ filepath: explicitPath, modelname: 'Client-Override-Model' }));
+    await tool.callback(tool.inputSchema.parse({ filepath: omittedPath }));
+
+    assert.equal(calls.processed.length, 2);
+    assert.equal(calls.processed[0]?.modelName, 'Client-Override-Model');
+    assert.equal(calls.processed[1]?.modelName, undefined);
   }
 });
 

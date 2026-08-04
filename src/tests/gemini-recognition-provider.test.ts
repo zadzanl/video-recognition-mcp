@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: checkpoint-4-gemini-adapter
+ * phase: task-2.7-evidence-closure
  * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-03
- * agent_notes: "Credential-free direct matrix for strict Gemini adapter flow and structural failures."
- * insights: "Numeric statuses are synthetic contract fixtures; installed SDK message-only errors remain unknown."
+ * last_modified: 2026-08-04
+ * agent_notes: "Credential-free direct matrix for strict Gemini adapter flow and structural failures; task 2.7 added no-echo rejection assertions."
+ * insights: "Numeric statuses are synthetic contract fixtures; installed SDK message-only errors remain unknown. Allowlist rejection safeMessage never echoes requested/default/allowed models or credentials."
  */
 
 import assert from 'node:assert/strict';
@@ -154,6 +154,26 @@ test('allowlist uses exact equality and rejects before filepath or service work'
   assert.equal(failure.category, 'invalid-request');
   assert.equal(failure.safeMessage, 'Requested model is not allowed.');
   assert.equal(rejected.calls.uploadedPaths.length, 0);
+});
+
+test('allowlist rejection safe message never echoes requested, default, allowed models, or credentials', async () => {
+  const { service, calls } = fakeService();
+  const provider = new GeminiRecognitionProvider(
+    service,
+    config({
+      apiKey: 'DO-NOT-ECHO-CREDENTIAL',
+      model: 'Default-Model',
+      modelAllowlist: ['Allowed-One', 'Allowed-Two']
+    })
+  );
+  const failure = await captureFailure(provider, request({ model: 'Requested-Model' }));
+  assert.equal(failure.category, 'invalid-request');
+  assert.equal(failure.safeMessage, 'Requested model is not allowed.');
+  for (const leaked of ['Requested-Model', 'Default-Model', 'Allowed-One', 'Allowed-Two', 'DO-NOT-ECHO-CREDENTIAL']) {
+    assert.equal(failure.safeMessage.includes(leaked), false);
+  }
+  assert.equal(calls.uploadedPaths.length, 0);
+  assert.equal(calls.generations.length, 0);
 });
 
 test('all supported Gemini media pairs reach upload including ogg', async () => {
