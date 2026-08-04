@@ -1,17 +1,20 @@
 /**
  * status: active
- * phase: phase-4a-standalone-adapter
+ * phase: phase-4b-request-boundaries
  * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-04
- * agent_notes: "Credential-free matrix for Phase 4a: media MIME, request construction, strict response, full error_type and HTTP fallback, redirect, Retry-After, network, redaction, source assertions."
- * insights: "Phase 4a is a complete standalone adapter; Phase 4b adds timeout, bounded reader, model grammar, and containment. Tests cover every normative row of the spec without live network or real credentials."
+ * last_modified: 2026-08-05
+ * agent_notes: "Provides comprehensive, credential-free unit tests for the OpenAI-compatible recognition provider."
+ * insights: "Tests utilize memory-based fetching and isolated temp directories. Important coverage includes verifying exact POST bodies, strict model allowlists, race-safe aborts, and accurate HTTP error mapping."
  */
 
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import {
+  mkdir,
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -23,6 +26,7 @@ import {
 import type { OpenAICompatibleProviderConfig } from '../services/provider-config.js';
 import type {
   MediaKind,
+  ProviderCallOptions,
   ProviderFailure,
   RecognitionRequest
 } from '../types/provider.js';
@@ -47,7 +51,7 @@ const config = (overrides: Partial<OpenAICompatibleProviderConfig> = {}): OpenAI
   requestTimeoutSeconds: 60,
   maxResponseBytes: 1024,
   maxInlineMediaBytes: 1024,
-  allowedMediaRoots: ['C:\\placeholder\\root'],
+  allowedMediaRoots: [tempRoot],
   allowInsecureLocal: false,
   ...overrides
 });
@@ -299,13 +303,19 @@ test('unsupported, wrong-kind, and missing extensions throw unsupported-media wi
     ['video', '.wav'],
     ['image', '']
   ];
+  let caseIndex = 0;
   for (const [mediaKind, extension] of cases) {
+    caseIndex += 1;
     const { fetchFn, calls } = throwFetch(new Error('should not be reached'));
     const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
-    const filepath = `virtual${extension === '' ? '' : 'X'}${extension}`;
+    // Use a real file in tempRoot so canonical containment passes and the extension check is what rejects.
+    const filename = extension === ''
+      ? `unsupported-${caseIndex}-noext`
+      : `unsupported-${caseIndex}${extension}`;
+    const filepath = await writeTempFile(filename, Buffer.from('payload'));
     const failure = await captureFailure(
       provider,
-      request({ filepath: extension === '' ? 'no-extension' : filepath, mediaKind })
+      request({ filepath, mediaKind })
     );
     assert.equal(failure.category, 'unsupported-media', `extension=${extension} kind=${mediaKind}`);
     assert.equal(calls.length, 0);
@@ -699,6 +709,11 @@ test('adapter source uses incremental reader and excludes forbidden behaviors an
   );
   assert.match(source, /getReader\(\)/u);
   assert.match(source, /new TextDecoder\(\)/u);
+  assert.match(source, /setTimeout/u);
+  assert.match(source, /clearTimeout/u);
+  assert.match(source, /realpath/u);
+  assert.match(source, /\[\.\.\.value\]\.length/u);
+  assert.match(source, /Provider response exceeded the configured size limit\./u);
   assert.doesNotMatch(source, /response\.text\(\)/u);
   assert.doesNotMatch(source, /response\.arrayBuffer\(\)/u);
   for (const token of [
@@ -719,4 +734,815 @@ test('adapter source uses incremental reader and excludes forbidden behaviors an
   assert.match(source, /\bredirect: 'manual'/u);
   assert.match(source, /video\/mov/u);
   assert.match(source, /audio\/mp3/u);
+});
+
+// =============================================================================
+// Phase 4b: abort ownership, bounded reading, identifier validation, containment
+// =============================================================================
+
+// Local helper: capture failure with explicit options (Phase 4b needs signal control).
+const captureFailureWithOptions = async (
+  provider: OpenAICompatibleRecognitionProvider,
+  recognitionRequest: RecognitionRequest,
+  options?: ProviderCallOptions
+): Promise<ProviderFailure> => {
+  try {
+    await provider.recognize(recognitionRequest, options);
+    assert.fail('expected provider failure');
+  } catch (error) {
+    assert.equal(error instanceof Error, true);
+    return error as ProviderFailure;
+  }
+};
+
+// Local helper: a ReadableStream with read/cancel counters and on-demand chunks.
+const createControlledStream = (): {
+  body: ReadableStream<Uint8Array>;
+  readStarted: Promise<void>;
+  readCount: () => number;
+  cancelCount: () => number;
+  enqueueChunk: (chunk: Uint8Array) => void;
+  closeStream: () => void;
+} => {
+  const state = { readCount: 0, cancelCount: 0 };
+  let resolveReadStarted: (() => void) | undefined;
+  const readStarted = new Promise<void>((resolve) => {
+    resolveReadStarted = resolve;
+  });
+  const queue: { chunk: Uint8Array | null }[] = [];
+  let closed = false;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (queue.length > 0) {
+        const next = queue.shift();
+        if (next === undefined || next.chunk === null) {
+          controller.close();
+        } else {
+          controller.enqueue(next.chunk);
+        }
+      } else if (closed) {
+        controller.close();
+      }
+      // else: keep waiting for more data
+    },
+    cancel() {
+      state.cancelCount += 1;
+    }
+  });
+  // Wrap getReader to count read() calls.
+  const origGetReader = stream.getReader.bind(stream);
+  Object.defineProperty(stream, 'getReader', {
+    value: () => {
+      const reader = origGetReader();
+      const origRead = reader.read.bind(reader);
+      Object.defineProperty(reader, 'read', {
+        value: async () => {
+          state.readCount += 1;
+          resolveReadStarted?.();
+          return origRead();
+        }
+      });
+      return reader;
+    },
+    configurable: true
+  });
+  return {
+    body: stream,
+    readStarted,
+    readCount: () => state.readCount,
+    cancelCount: () => state.cancelCount,
+    enqueueChunk: (chunk) => {
+      queue.push({ chunk });
+    },
+    closeStream: () => {
+      closed = true;
+      queue.push({ chunk: null });
+    }
+  };
+};
+
+// Local helper: a fetch that waits for the composed signal to abort.
+const waitingFetch = (): typeof globalThis.fetch => {
+  const fetchFn: typeof globalThis.fetch = (async (
+    _input: RequestInfo | URL,
+    init?: RequestInit
+  ): Promise<Response> => {
+    return await new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (signal === undefined || signal === null) {
+        reject(new Error('no signal'));
+        return;
+      }
+      const onAbort = (): void => {
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        reject(err);
+      };
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }) as typeof globalThis.fetch;
+  return fetchFn;
+};
+
+test('pre-aborted caller does zero model, path, read, timer, or fetch work', async () => {
+  const fetchFn: typeof globalThis.fetch = (async () => {
+    assert.fail('fetch must not be reached');
+  }) as typeof globalThis.fetch;
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const controller = new AbortController();
+  controller.abort();
+  const hostileRequest = {
+    get filepath(): string { return unexpectedAccess('filepath'); },
+    get prompt(): string { return unexpectedAccess('prompt'); },
+    get mediaKind(): 'image' { return unexpectedAccess('mediaKind'); },
+    get model(): string { return unexpectedAccess('model'); }
+  } as RecognitionRequest;
+  const failure = await captureFailureWithOptions(
+    provider,
+    hostileRequest,
+    { signal: controller.signal }
+  );
+  assert.equal(failure.category, 'cancelled');
+  assert.equal(failure.code, 'CALLER_CANCELLED');
+});
+
+test('caller abort during local preparation is observed before fetch', async () => {
+  const controller = new AbortController();
+  const { fetchFn, calls } = throwFetch(new Error('fetch must not be reached'));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('abort-preparation.jpg', Buffer.from('payload'));
+
+  const recognizePromise = provider.recognize(
+    request({ filepath }),
+    { signal: controller.signal }
+  );
+  // recognize() has reached its first filesystem await before returning its promise.
+  controller.abort();
+
+  let failure: ProviderFailure;
+  try {
+    await recognizePromise;
+    assert.fail('expected provider failure');
+  } catch (error) {
+    assert.equal(error instanceof Error, true);
+    failure = error as ProviderFailure;
+  }
+  assert.equal(failure.category, 'cancelled');
+  assert.equal(failure.code, 'CALLER_CANCELLED');
+  assert.equal(calls.length, 0);
+});
+
+test('caller abort during pending fetch yields CALLER_CANCELLED with one fetch and no listener leak', async () => {
+  const controller = new AbortController();
+  const waiting = waitingFetch();
+  let fetchCalls = 0;
+  let resolveFetchStarted: (() => void) | undefined;
+  const fetchStarted = new Promise<void>((resolve) => {
+    resolveFetchStarted = resolve;
+  });
+  const countingFetch: typeof globalThis.fetch = (async (
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ): Promise<Response> => {
+    fetchCalls += 1;
+    resolveFetchStarted?.();
+    return waiting(input, init);
+  }) as typeof globalThis.fetch;
+  const provider = new OpenAICompatibleRecognitionProvider(config(), countingFetch);
+  const filepath = await writeTempFile('abortfetch.jpg', Buffer.from('payload'));
+
+  const recognizePromise = provider.recognize(
+    request({ filepath }),
+    { signal: controller.signal }
+  );
+  await fetchStarted;
+  const beforeAbort = getEventListeners(controller.signal, 'abort').length;
+  controller.abort();
+
+  let failure: ProviderFailure;
+  try {
+    await recognizePromise;
+    assert.fail('expected provider failure');
+  } catch (error) {
+    assert.equal(error instanceof Error, true);
+    failure = error as ProviderFailure;
+  }
+  assert.equal(failure.category, 'cancelled');
+  assert.equal(failure.code, 'CALLER_CANCELLED');
+  assert.equal(fetchCalls, 1);
+  const afterAbort = getEventListeners(controller.signal, 'abort').length;
+  assert.equal(afterAbort, beforeAbort - 1, 'caller abort listener must be removed');
+});
+
+test('caller abort during pending body read yields CALLER_CANCELLED and cancels the active reader', async () => {
+  const controller = new AbortController();
+  const { body, readStarted, cancelCount } = createControlledStream();
+  const response = new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'application/json' }
+  });
+  const { fetchFn, calls } = recordingFetch(() => response);
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('abortread.jpg', Buffer.from('payload'));
+
+  const recognizePromise = provider.recognize(
+    request({ filepath }),
+    { signal: controller.signal }
+  );
+  await readStarted;
+  const beforeAbort = getEventListeners(controller.signal, 'abort').length;
+  controller.abort();
+
+  let failure: ProviderFailure;
+  try {
+    await recognizePromise;
+    assert.fail('expected provider failure');
+  } catch (error) {
+    assert.equal(error instanceof Error, true);
+    failure = error as ProviderFailure;
+  }
+  assert.equal(failure.category, 'cancelled');
+  assert.equal(failure.code, 'CALLER_CANCELLED');
+  assert.equal(calls.length, 1);
+  assert.equal(cancelCount(), 1, 'reader must be cancelled exactly once');
+  const afterAbort = getEventListeners(controller.signal, 'abort').length;
+  assert.equal(afterAbort, beforeAbort - 1, 'caller abort listener must be removed');
+});
+
+test('rejecting reader cancellation is handled during caller abort', async () => {
+  const controller = new AbortController();
+  const cancelError = new Error('cancel failed');
+  let resolveReadStarted: (() => void) | undefined;
+  const readStarted = new Promise<void>((resolve) => {
+    resolveReadStarted = resolve;
+  });
+  const stream = new ReadableStream<Uint8Array>({
+    cancel: async () => {
+      throw cancelError;
+    }
+  });
+  const originalGetReader = stream.getReader.bind(stream);
+  Object.defineProperty(stream, 'getReader', {
+    value: () => {
+      const reader = originalGetReader();
+      const originalRead = reader.read.bind(reader);
+      Object.defineProperty(reader, 'read', {
+        value: async () => {
+          resolveReadStarted?.();
+          return originalRead();
+        }
+      });
+      return reader;
+    },
+    configurable: true
+  });
+  const response = new Response(stream, {
+    status: 200,
+    headers: { 'content-type': 'application/json' }
+  });
+  const { fetchFn } = recordingFetch(() => response);
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('reject-cancel.jpg', Buffer.from('payload'));
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+
+  try {
+    const recognizePromise = provider.recognize(
+      request({ filepath }),
+      { signal: controller.signal }
+    );
+    await readStarted;
+    controller.abort();
+
+    let failure: ProviderFailure;
+    try {
+      await recognizePromise;
+      assert.fail('expected provider failure');
+    } catch (error) {
+      assert.equal(error instanceof Error, true);
+      failure = error as ProviderFailure;
+    }
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(failure.category, 'cancelled');
+    assert.equal(failure.code, 'CALLER_CANCELLED');
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled);
+  }
+});
+
+test('timer abort during fetch yields ADAPTER_TIMEOUT with one fetch', async () => {
+  const fetchFn = waitingFetch();
+  const provider = new OpenAICompatibleRecognitionProvider(
+    config({ requestTimeoutSeconds: 1 }),
+    fetchFn
+  );
+  const filepath = await writeTempFile('timerfetch.jpg', Buffer.from('payload'));
+  const start = Date.now();
+  const failure = await captureFailureWithOptions(provider, request({ filepath }));
+  const elapsed = Date.now() - start;
+  assert.equal(failure.category, 'timeout');
+  assert.equal(failure.code, 'ADAPTER_TIMEOUT');
+  assert.ok(elapsed >= 900, `expected ~1s timer, got ${elapsed}ms`);
+  assert.ok(elapsed < 3000, `expected <3s, got ${elapsed}ms`);
+});
+
+test('timer abort during body read yields ADAPTER_TIMEOUT and cancels the active reader', async () => {
+  const { body, cancelCount } = createControlledStream();
+  const response = new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'application/json' }
+  });
+  const { fetchFn, calls } = recordingFetch(() => response);
+  const provider = new OpenAICompatibleRecognitionProvider(
+    config({ requestTimeoutSeconds: 1 }),
+    fetchFn
+  );
+  const filepath = await writeTempFile('timerread.jpg', Buffer.from('payload'));
+  const start = Date.now();
+  const failure = await captureFailureWithOptions(provider, request({ filepath }));
+  const elapsed = Date.now() - start;
+  assert.equal(failure.category, 'timeout');
+  assert.equal(failure.code, 'ADAPTER_TIMEOUT');
+  assert.equal(calls.length, 1);
+  assert.ok(elapsed >= 900, `expected ~1s timer, got ${elapsed}ms`);
+  assert.ok(elapsed < 3000, `expected <3s, got ${elapsed}ms`);
+  assert.equal(cancelCount() >= 1, true, 'reader must be cancelled when timer aborts');
+});
+
+test('abort-like unowned fetch throw with AbortError name remains network', async () => {
+  const cause = new Error('aborted INJECTED-SECRET');
+  cause.name = 'AbortError';
+  const { fetchFn, calls } = throwFetch(cause);
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('abortlike.jpg', Buffer.from('payload'));
+  const failure = await captureFailureWithOptions(provider, request({ filepath }));
+  assert.equal(failure.category, 'network');
+  assert.equal(failure.code, undefined);
+  assert.equal(failure.safeMessage.includes('INJECTED-SECRET'), false);
+  assert.equal(calls.length, 1);
+});
+
+test('abort-like unowned body read rejection with AbortError name remains network', async () => {
+  const { body } = createControlledStream();
+  // Wrap the body to make read() reject with an AbortError-like error.
+  const origGetReader = body.getReader.bind(body);
+  Object.defineProperty(body, 'getReader', {
+    value: () => {
+      const reader = origGetReader();
+      // Bind to keep the original read accessible in scope; the wrapper always rejects
+      // so the original read is intentionally unused here.
+      const _origRead = reader.read.bind(reader);
+      void _origRead;
+      Object.defineProperty(reader, 'read', {
+        value: async () => {
+          const err = new Error('aborted INJECTED-SECRET');
+          err.name = 'AbortError';
+          throw err;
+        }
+      });
+      return reader;
+    },
+    configurable: true
+  });
+  const response = new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'application/json' }
+  });
+  const { fetchFn } = recordingFetch(() => response);
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('abortbody.jpg', Buffer.from('payload'));
+  const failure = await captureFailureWithOptions(provider, request({ filepath }));
+  assert.equal(failure.category, 'network');
+  assert.equal(failure.code, undefined);
+  assert.equal(failure.safeMessage.includes('INJECTED-SECRET'), false);
+});
+
+test('caller abort listener is removed after success', async () => {
+  const controller = new AbortController();
+  const { fetchFn } = recordingFetch(() => jsonResponse(successBody('ok')));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('cleanup.jpg', Buffer.from('payload'));
+  const before = getEventListeners(controller.signal, 'abort').length;
+  await provider.recognize(request({ filepath }), { signal: controller.signal });
+  const after = getEventListeners(controller.signal, 'abort').length;
+  assert.equal(after, before, 'caller abort listener must be removed after success');
+});
+
+test('caller abort listener is removed after redirect rejection', async () => {
+  const controller = new AbortController();
+  const { fetchFn } = recordingFetch(() => new Response(null, { status: 301 }));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('cleanup-redir.jpg', Buffer.from('payload'));
+  const before = getEventListeners(controller.signal, 'abort').length;
+  await captureFailureWithOptions(
+    provider,
+    request({ filepath }),
+    { signal: controller.signal }
+  );
+  const after = getEventListeners(controller.signal, 'abort').length;
+  assert.equal(after, before, 'caller abort listener must be removed after redirect');
+});
+
+test('response exactly at maxResponseBytes reaches parse; first byte over cancels the reader', async () => {
+  // Chunks: first at exact cap, second would exceed, third must never be read.
+  const chunks: Uint8Array[] = [
+    new Uint8Array(10),
+    new Uint8Array(1),
+    new Uint8Array(100)
+  ];
+  const state = { readCount: 0, cancelCount: 0 };
+  const preEnqueuedStream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const c of chunks) controller.enqueue(c);
+      controller.close();
+    },
+    cancel() {
+      state.cancelCount += 1;
+    }
+  });
+  const origGetReader = preEnqueuedStream.getReader.bind(preEnqueuedStream);
+  Object.defineProperty(preEnqueuedStream, 'getReader', {
+    value: () => {
+      const reader = origGetReader();
+      const origRead = reader.read.bind(reader);
+      Object.defineProperty(reader, 'read', {
+        value: async () => {
+          state.readCount += 1;
+          return origRead();
+        }
+      });
+      return reader;
+    },
+    configurable: true
+  });
+
+  const response = new Response(preEnqueuedStream, {
+    status: 200,
+    headers: { 'content-type': 'application/json' }
+  });
+  const { fetchFn } = recordingFetch(() => response);
+  const provider = new OpenAICompatibleRecognitionProvider(
+    config({ maxResponseBytes: 10 }),
+    fetchFn
+  );
+  const filepath = await writeTempFile('cap.jpg', Buffer.from('payload'));
+  const failure = await captureFailureWithOptions(provider, request({ filepath }));
+  assert.equal(failure.category, 'malformed-response');
+  assert.equal(failure.safeMessage, 'Provider response exceeded the configured size limit.');
+  assert.equal(state.readCount, 2, 'must not read more than the cap-exceed chunk');
+  assert.equal(state.cancelCount, 1, 'reader must be cancelled once');
+});
+
+test('response exactly at maxResponseBytes with single chunk is accepted for parse', async () => {
+  // Use a valid JSON of exactly the cap size so parse can succeed.
+  const validJson = '{"choices":[{"message":{"content":"ok"}}]}';
+  const jsonBytes = new TextEncoder().encode(validJson);
+  assert.equal(jsonBytes.byteLength, 42, 'fixture must be exactly 42 bytes');
+  const chunks: Uint8Array[] = [jsonBytes];
+  const state = { readCount: 0, cancelCount: 0 };
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const c of chunks) controller.enqueue(c);
+      controller.close();
+    },
+    cancel() {
+      state.cancelCount += 1;
+    }
+  });
+  const origGetReader = stream.getReader.bind(stream);
+  Object.defineProperty(stream, 'getReader', {
+    value: () => {
+      const reader = origGetReader();
+      const origRead = reader.read.bind(reader);
+      Object.defineProperty(reader, 'read', {
+        value: async () => {
+          state.readCount += 1;
+          return origRead();
+        }
+      });
+      return reader;
+    },
+    configurable: true
+  });
+  const response = new Response(stream, {
+    status: 200,
+    headers: { 'content-type': 'application/json' }
+  });
+  const { fetchFn } = recordingFetch(() => response);
+  const provider = new OpenAICompatibleRecognitionProvider(
+    config({ maxResponseBytes: 42 }),
+    fetchFn
+  );
+  const filepath = await writeTempFile('exactcap.jpg', Buffer.from('payload'));
+  const result = await provider.recognize(request({ filepath }));
+  assert.deepEqual(result, { text: 'ok' });
+  assert.equal(state.readCount, 2); // one for the chunk, one for done
+  assert.equal(state.cancelCount, 0);
+});
+
+test('call-time model accepts exactly 200 Unicode scalar values', async () => {
+  const { fetchFn, calls } = recordingFetch(() => jsonResponse(successBody('ok')));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('model200.jpg', Buffer.from('payload'));
+  const model200 = 'a'.repeat(200);
+  const result = await provider.recognize(request({ model: model200, filepath }));
+  assert.deepEqual(result, { text: 'ok' });
+  assert.equal(calls.length, 1);
+});
+
+test('call-time model rejects 201 Unicode scalar values before file or fetch', async () => {
+  const { fetchFn, calls } = throwFetch(new Error('should not be reached'));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('model201.jpg', Buffer.from('payload'));
+  const model201 = 'a'.repeat(201);
+  const failure = await captureFailureWithOptions(
+    provider,
+    request({ model: model201, filepath })
+  );
+  assert.equal(failure.category, 'invalid-request');
+  assert.equal(failure.safeMessage, 'Requested model is invalid.');
+  assert.equal(calls.length, 0);
+});
+
+test('call-time model counts astral scalars as one code point', async () => {
+  const { fetchFn, calls } = recordingFetch(() => jsonResponse(successBody('ok')));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('astral.jpg', Buffer.from('payload'));
+  // 😀 is U+1F600, one astral scalar.
+  const model = '😀'.repeat(200);
+  const result = await provider.recognize(request({ model, filepath }));
+  assert.deepEqual(result, { text: 'ok' });
+  assert.equal(calls.length, 1);
+});
+
+test('call-time model rejects C0, DEL, U+2028, and U+2029 before file or fetch', async () => {
+  const { fetchFn, calls } = throwFetch(new Error('should not be reached'));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const cases: readonly (readonly [string, string])[] = [
+    ['C0 NUL', '\u0000'],
+    ['C0 LF', '\u000a'],
+    ['C0 CR', '\u000d'],
+    ['C0 US', '\u001f'],
+    ['DEL', '\u007f'],
+    ['U+2028', '\u2028'],
+    ['U+2029', '\u2029']
+  ];
+  let caseIndex = 0;
+  for (const [label, char] of cases) {
+    caseIndex += 1;
+    const filepath = await writeTempFile(`model-${label}-${caseIndex}.jpg`, Buffer.from('payload'));
+    const failure = await captureFailureWithOptions(
+      provider,
+      request({ model: `goodprefix-${char}-goodsuffix`, filepath })
+    );
+    assert.equal(failure.category, 'invalid-request', `char=${label}`);
+    assert.equal(failure.safeMessage, 'Requested model is invalid.');
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('every public safeMessage is below 4096 UTF-8 bytes with no raw line separators', () => {
+  const safeMessages: readonly string[] = [
+    'Requested model is not allowed.',
+    'Requested model is invalid.',
+    'OpenAI-compatible file is not in an allowed media root.',
+    'Provider response exceeded the configured size limit.',
+    'OpenAI-compatible provider configuration is invalid.',
+    'OpenAI-compatible provider authentication failed.',
+    'OpenAI-compatible provider permission was denied.',
+    'OpenAI-compatible provider billing authorization failed.',
+    'OpenAI-compatible provider rejected the request.',
+    'OpenAI-compatible provider does not support this media.',
+    'OpenAI-compatible provider refused the request for safety reasons.',
+    'OpenAI-compatible provider rate limit was reached.',
+    'OpenAI-compatible request timed out.',
+    'OpenAI-compatible provider is temporarily unavailable.',
+    'OpenAI-compatible network request failed.',
+    'OpenAI-compatible request was cancelled.',
+    'OpenAI-compatible provider returned a malformed response.',
+    'OpenAI-compatible request failed.'
+  ];
+  for (const msg of safeMessages) {
+    const bytes = new TextEncoder().encode(msg).byteLength;
+    assert.ok(bytes < 4096, `safeMessage exceeds 4096 bytes (${bytes}): ${msg}`);
+    assert.equal(msg.includes('\u2028'), false, `safeMessage contains U+2028: ${msg}`);
+    assert.equal(msg.includes('\u2029'), false, `safeMessage contains U+2029: ${msg}`);
+  }
+});
+
+test('canonical containment accepts a regular file directly inside an allowed root', async () => {
+  const { fetchFn, calls } = recordingFetch(() => jsonResponse(successBody('ok')));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('inside.jpg', Buffer.from('payload'));
+  const result = await provider.recognize(request({ filepath }));
+  assert.deepEqual(result, { text: 'ok' });
+  assert.equal(calls.length, 1);
+});
+
+test('canonical containment accepts a nested file below an allowed root', async () => {
+  const { fetchFn, calls } = recordingFetch(() => jsonResponse(successBody('ok')));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const nestedDir = path.join(tempRoot, 'nested');
+  await mkdir(nestedDir);
+  const filepath = path.join(nestedDir, 'nested.jpg');
+  await writeFile(filepath, Buffer.from('payload'));
+  const result = await provider.recognize(request({ filepath }));
+  assert.deepEqual(result, { text: 'ok' });
+  assert.equal(calls.length, 1);
+});
+
+test('canonical containment rejects a directory before fetch', async () => {
+  const { fetchFn, calls } = throwFetch(new Error('should not be reached'));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const failure = await captureFailureWithOptions(
+    provider,
+    request({ filepath: tempRoot })
+  );
+  assert.equal(failure.category, 'invalid-request');
+  assert.equal(failure.safeMessage, 'OpenAI-compatible file is not in an allowed media root.');
+  assert.equal(calls.length, 0);
+});
+
+test('canonical containment rejects a missing path before fetch', async () => {
+  const { fetchFn, calls } = throwFetch(new Error('should not be reached'));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const missingPath = path.join(tempRoot, 'does-not-exist.jpg');
+  const failure = await captureFailureWithOptions(
+    provider,
+    request({ filepath: missingPath })
+  );
+  assert.equal(failure.category, 'invalid-request');
+  assert.equal(failure.safeMessage, 'OpenAI-compatible file is not in an allowed media root.');
+  assert.equal(calls.length, 0);
+});
+
+test('canonical containment rejects an outside file before fetch', async () => {
+  const { fetchFn, calls } = throwFetch(new Error('should not be reached'));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const outsideRoot = await mkdtemp(path.join(tmpdir(), 'openai-outside-'));
+  try {
+    const filepath = path.join(outsideRoot, 'outside.jpg');
+    await writeFile(filepath, Buffer.from('payload'));
+    const failure = await captureFailureWithOptions(
+      provider,
+      request({ filepath })
+    );
+    assert.equal(failure.category, 'invalid-request');
+    assert.equal(failure.safeMessage, 'OpenAI-compatible file is not in an allowed media root.');
+    assert.equal(calls.length, 0);
+  } finally {
+    await rm(outsideRoot, { recursive: true, force: true });
+  }
+});
+
+test('canonical containment rejects traversal to an outside file before fetch', async () => {
+  const { fetchFn, calls } = throwFetch(new Error('should not be reached'));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const outsideRoot = await mkdtemp(path.join(tmpdir(), 'openai-outside-'));
+  try {
+    const outsideFile = path.join(outsideRoot, 'outside.jpg');
+    await writeFile(outsideFile, Buffer.from('payload'));
+    // Traverse from tempRoot up and into outsideRoot.
+    const traversalPath = path.join(
+      tempRoot,
+      '..',
+      path.basename(outsideRoot),
+      'outside.jpg'
+    );
+    const failure = await captureFailureWithOptions(
+      provider,
+      request({ filepath: traversalPath })
+    );
+    assert.equal(failure.category, 'invalid-request');
+    assert.equal(failure.safeMessage, 'OpenAI-compatible file is not in an allowed media root.');
+    assert.equal(calls.length, 0);
+  } finally {
+    await rm(outsideRoot, { recursive: true, force: true });
+  }
+});
+
+test('canonical containment rejects sibling-prefix confusion before fetch', async () => {
+  const { fetchFn, calls } = throwFetch(new Error('should not be reached'));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  // Create a sibling directory whose name starts with tempRoot's name.
+  const siblingRoot = `${tempRoot}-sibling`;
+  await mkdir(siblingRoot);
+  try {
+    const siblingFile = path.join(siblingRoot, 'sibling.jpg');
+    await writeFile(siblingFile, Buffer.from('payload'));
+    const failure = await captureFailureWithOptions(
+      provider,
+      request({ filepath: siblingFile })
+    );
+    assert.equal(failure.category, 'invalid-request');
+    assert.equal(failure.safeMessage, 'OpenAI-compatible file is not in an allowed media root.');
+    assert.equal(calls.length, 0);
+  } finally {
+    await rm(siblingRoot, { recursive: true, force: true });
+  }
+});
+
+test('canonical containment accepts an inside link whose target is inside', async () => {
+  const { fetchFn, calls } = recordingFetch(() => jsonResponse(successBody('ok')));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const target = await writeTempFile('link-target.jpg', Buffer.from('payload'));
+  const linkPath = path.join(tempRoot, 'inside-link.jpg');
+  try {
+    await symlink(target, linkPath);
+  } catch (cause) {
+    // symlink may fail on Windows without privilege; skip without weakening production.
+    console.log(`symlink skipped: ${(cause as Error).message}`);
+    return;
+  }
+  const result = await provider.recognize(request({ filepath: linkPath }));
+  assert.deepEqual(result, { text: 'ok' });
+  assert.equal(calls.length, 1);
+});
+
+test('canonical containment rejects an inside link whose target is outside', async () => {
+  const { fetchFn, calls } = throwFetch(new Error('should not be reached'));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const outsideRoot = await mkdtemp(path.join(tmpdir(), 'openai-outside-'));
+  try {
+    const target = path.join(outsideRoot, 'outside.jpg');
+    await writeFile(target, Buffer.from('payload'));
+    const linkPath = path.join(tempRoot, 'outside-link.jpg');
+    try {
+      await symlink(target, linkPath);
+    } catch (cause) {
+      // symlink may fail on Windows without privilege; skip without weakening production.
+      console.log(`symlink skipped: ${(cause as Error).message}`);
+      return;
+    }
+    const failure = await captureFailureWithOptions(
+      provider,
+      request({ filepath: linkPath })
+    );
+    assert.equal(failure.category, 'invalid-request');
+    assert.equal(failure.safeMessage, 'OpenAI-compatible file is not in an allowed media root.');
+    assert.equal(calls.length, 0);
+  } finally {
+    await rm(outsideRoot, { recursive: true, force: true });
+  }
+});
+
+test('canonical containment is case-insensitive on Windows for separator-aware containment', async function () {
+  if (process.platform !== 'win32') {
+    // POSIX is case-sensitive; Windows-only test.
+    return;
+  }
+  const { fetchFn, calls } = recordingFetch(() => jsonResponse(successBody('ok')));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const filepath = await writeTempFile('case.jpg', Buffer.from('payload'));
+  // Request the file with a different case; realpath normalizes case on Windows.
+  const upperFilepath = filepath.toUpperCase();
+  const result = await provider.recognize(request({ filepath: upperFilepath }));
+  assert.deepEqual(result, { text: 'ok' });
+  assert.equal(calls.length, 1);
+});
+
+test('canonical containment rejects an outside Windows directory junction', async function () {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const { fetchFn, calls } = throwFetch(new Error('should not be reached'));
+  const provider = new OpenAICompatibleRecognitionProvider(config(), fetchFn);
+  const outsideRoot = await mkdtemp(path.join(tmpdir(), 'openai-outside-'));
+  const junctionPath = path.join(tempRoot, 'outside-junction');
+  try {
+    // Directory junction (Windows-specific).
+    await symlink(outsideRoot, junctionPath, 'junction');
+  } catch (cause) {
+    const message = (cause as Error).message;
+    const code = (cause as NodeJS.ErrnoException).code ?? 'UNKNOWN';
+    console.log(`Windows junction skipped (${code}): ${message}`);
+    await rm(outsideRoot, { recursive: true, force: true });
+    return;
+  }
+  try {
+    const target = path.join(outsideRoot, 'outside.jpg');
+    await writeFile(target, Buffer.from('payload'));
+    const failure = await captureFailureWithOptions(
+      provider,
+      request({ filepath: path.join(junctionPath, 'outside.jpg') })
+    );
+    assert.equal(failure.category, 'invalid-request');
+    assert.equal(failure.safeMessage, 'OpenAI-compatible file is not in an allowed media root.');
+    assert.equal(calls.length, 0);
+  } finally {
+    await rm(outsideRoot, { recursive: true, force: true });
+    try {
+      await rm(junctionPath, { recursive: true, force: true });
+    } catch {
+      // junction may already be cleaned up
+    }
+  }
 });

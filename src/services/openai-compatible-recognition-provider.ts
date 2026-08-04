@@ -1,13 +1,15 @@
 /**
  * status: active
- * phase: phase-4a-standalone-adapter
+ * phase: phase-4b-request-boundaries
  * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-04
- * agent_notes: "Phase 4a standalone adapter; pre-abort, allowlist, media matrix, exact request, strict response and failure mapping, manual redirect. Unwired by design."
- * insights: "Use video/mov and audio/mp3 per design; oversized input is unsupported-media; rejected manual 3xx is unknown; incremental reader uses getReader/TextDecoder without claiming Phase 4b byte cap or timeout ownership."
+ * last_modified: 2026-08-05
+ * agent_notes: "Implements the OpenAI-compatible recognition provider, handling media conversion, bounded reading, and request validation."
+ * insights: "Abort ownership is managed by a race between a caller signal and a local timer. Bounded reading stops exactly at the byte cap to prevent memory exhaustion. Identifiers and paths are validated before any network or file I/O."
+ *
+ * Known ceiling: This adapter currently runs standalone. End-to-end wiring (server and tools) will be handled in a later phase. Concurrent filesystem mutations during reads are not mitigated.
  */
 
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type {
   MediaKind,
@@ -21,6 +23,83 @@ import type { OpenAICompatibleProviderConfig } from './provider-config.js';
 import { createProviderFailure } from './provider-failure.js';
 
 const ALLOWLIST_SAFE_MESSAGE = 'Requested model is not allowed.';
+
+const MODEL_INVALID_SAFE_MESSAGE = 'Requested model is invalid.';
+const CONTAINMENT_SAFE_MESSAGE = 'OpenAI-compatible file is not in an allowed media root.';
+const BYTE_CAP_SAFE_MESSAGE = 'Provider response exceeded the configured size limit.';
+const MODEL_MAX_SCALARS = 200;
+
+const hasForbiddenIdentifierCharacter = (value: string): boolean => {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint <= 0x1f || codePoint === 0x7f || codePoint === 0x2028 || codePoint === 0x2029) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const countUnicodeScalars = (value: string): number => [...value].length;
+
+const assertValidModelIdentifier = (model: string): void => {
+  if (countUnicodeScalars(model) > MODEL_MAX_SCALARS
+    || hasForbiddenIdentifierCharacter(model)) {
+    throw createProviderFailure({
+      provider: 'openai-compatible',
+      category: 'invalid-request',
+      safeMessage: MODEL_INVALID_SAFE_MESSAGE
+    });
+  }
+};
+
+const isCanonicalChild = (root: string, candidate: string): boolean => {
+  const rootForm = process.platform === 'win32' ? root.toLowerCase() : root;
+  const candidateForm = process.platform === 'win32' ? candidate.toLowerCase() : candidate;
+  return candidateForm.startsWith(rootForm + path.sep);
+};
+
+const canonicalizeContainedFile = async (
+  filepath: string,
+  roots: readonly string[]
+): Promise<string> => {
+  let canonical: string;
+  try {
+    canonical = await realpath(filepath);
+  } catch (cause) {
+    throw createProviderFailure({
+      provider: 'openai-compatible',
+      category: 'invalid-request',
+      safeMessage: CONTAINMENT_SAFE_MESSAGE,
+      cause
+    });
+  }
+  let stats;
+  try {
+    stats = await stat(canonical);
+  } catch (cause) {
+    throw createProviderFailure({
+      provider: 'openai-compatible',
+      category: 'invalid-request',
+      safeMessage: CONTAINMENT_SAFE_MESSAGE,
+      cause
+    });
+  }
+  if (!stats.isFile()) {
+    throw createProviderFailure({
+      provider: 'openai-compatible',
+      category: 'invalid-request',
+      safeMessage: CONTAINMENT_SAFE_MESSAGE
+    });
+  }
+  for (const root of roots) {
+    if (isCanonicalChild(root, canonical)) return canonical;
+  }
+  throw createProviderFailure({
+    provider: 'openai-compatible',
+    category: 'invalid-request',
+    safeMessage: CONTAINMENT_SAFE_MESSAGE
+  });
+};
 
 const safeMessages: Readonly<Record<ProviderFailureCategory, string>> = {
   configuration: 'OpenAI-compatible provider configuration is invalid.',
@@ -188,29 +267,68 @@ const parseRetryAfter = (headers: Headers): number | undefined => {
   return milliseconds;
 };
 
-const readResponseText = async (response: Response): Promise<string> => {
+interface ActiveReaderHolder {
+  current: ReadableStreamDefaultReader<Uint8Array> | null;
+}
+
+const readBoundedResponse = async (
+  response: Response,
+  maxBytes: number,
+  activeReaderHolder: ActiveReaderHolder
+): Promise<string> => {
   const body = response.body;
   if (body === null) return '';
   const reader = body.getReader();
+  activeReaderHolder.current = reader;
   const decoder = new TextDecoder();
   let text = '';
+  let totalBytes = 0;
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       if (value !== undefined) {
+        const chunkSize = value.byteLength;
+        if (totalBytes + chunkSize > maxBytes) {
+          // First byte over cap: cancel, do not read again, release lock, throw
+          try {
+            await reader.cancel();
+          } catch {
+            // reader may already be closed
+          }
+          activeReaderHolder.current = null;
+          try {
+            reader.releaseLock();
+          } catch {
+            // reader may already be released
+          }
+          throw createProviderFailure({
+            provider: 'openai-compatible',
+            category: 'malformed-response',
+            safeMessage: BYTE_CAP_SAFE_MESSAGE
+          });
+        }
+        totalBytes += chunkSize;
         text += decoder.decode(value, { stream: true });
       }
     }
     text += decoder.decode();
-  } finally {
+    activeReaderHolder.current = null;
     try {
       reader.releaseLock();
     } catch {
       // reader may already be released
     }
+    return text;
+  } catch (error) {
+    activeReaderHolder.current = null;
+    try {
+      reader.releaseLock();
+    } catch {
+      // reader may already be released
+    }
+    throw error;
   }
-  return text;
 };
 
 interface MappedFailureOptions {
@@ -239,12 +357,8 @@ const is3xx = (status: number): boolean => status >= 300 && status < 400;
 const isSignalAborted = (signal: AbortSignal | undefined): boolean =>
   signal !== undefined && signal.aborted === true;
 
-const parseProviderResponse = async (response: Response): Promise<string> => {
-  if (is3xx(response.status)) {
-    throw mappedFailure({ category: 'unknown', status: response.status });
-  }
-
-  const text = await readResponseText(response);
+const parseProviderResponse = async (response: Response, text: string): Promise<string> => {
+  // 3xx is rejected by the caller before bounded reading; this function only parses body text.
   const retryAfterMs = parseRetryAfter(response.headers);
 
   let parsed: unknown;
@@ -349,11 +463,18 @@ export class OpenAICompatibleRecognitionProvider implements RecognitionProvider 
     request: RecognitionRequest,
     options?: ProviderCallOptions
   ): Promise<RecognitionResult> {
+    // 1. Pre-aborted caller fails before any model, path, read, timer, or fetch work.
     if (isSignalAborted(options?.signal)) {
       throw mappedFailure({ category: 'cancelled', code: 'CALLER_CANCELLED' });
     }
 
+    // 2. Resolve effective model.
     const model = request.model ?? this.config.model;
+
+    // 3. Validate call-time model identifier (max 200 scalars, no C0/DEL/LS/PS).
+    assertValidModelIdentifier(model);
+
+    // 4. Enforce allowlist before any file or network work.
     if (this.config.modelAllowlist !== undefined
       && !this.config.modelAllowlist.includes(model)) {
       throw createProviderFailure({
@@ -363,10 +484,20 @@ export class OpenAICompatibleRecognitionProvider implements RecognitionProvider 
       });
     }
 
-    const mediaType = resolveMediaType(request.mediaKind, request.filepath);
-    const base64 = await readFileSafely(request.filepath, this.config.maxInlineMediaBytes);
+    // 5. Canonical containment: realpath + stat.isFile + separator-aware root check.
+    const canonicalFilepath = await canonicalizeContainedFile(
+      request.filepath,
+      this.config.allowedMediaRoots
+    );
+
+    // 6. Extension and MIME resolution (against the canonical path).
+    const mediaType = resolveMediaType(request.mediaKind, canonicalFilepath);
+
+    // 7. File metadata size guard, then read+base64 the canonical path.
+    const base64 = await readFileSafely(canonicalFilepath, this.config.maxInlineMediaBytes);
     const mediaPart = buildMediaPart(request.mediaKind, mediaType, base64);
 
+    // 8. Build the exact text-first body.
     const body = JSON.stringify({
       model,
       stream: false,
@@ -378,35 +509,137 @@ export class OpenAICompatibleRecognitionProvider implements RecognitionProvider 
       ]
     });
 
-    const init: RequestInit = {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body,
-      redirect: 'manual',
-      ...(options?.signal !== undefined ? { signal: options.signal } : {})
+    // 9. Immediately before fetch, compose the caller signal with a private timer.
+    const composedController = new AbortController();
+    // First-to-fire owns the abort: both the caller listener and the timer callback
+    // race on `abortOwner === undefined` to claim ownership. `undefined` is the
+    // "unowned" sentinel. Classification never reads error name or message.
+    let abortOwner: 'caller' | 'timer' | undefined = undefined;
+    const activeReaderHolder: ActiveReaderHolder = { current: null };
+    const callerListener: { fn: (() => void) | null } = { fn: null };
+    const timerState: { handle: ReturnType<typeof setTimeout> | null } = { handle: null };
+
+    const cancelActiveReader = (): void => {
+      if (activeReaderHolder.current !== null) {
+        try {
+          void activeReaderHolder.current.cancel().catch(() => {
+            // reader may already be closed or errored
+          });
+        } catch {
+          // reader may already be closed
+        }
+      }
     };
 
-    let response: Response;
-    try {
-      response = await this.fetchFn(this.config.baseUrl.toString(), init);
-    } catch (cause) {
-      if (isSignalAborted(options?.signal)) {
-        throw mappedFailure({ category: 'cancelled', code: 'CALLER_CANCELLED', cause });
-      }
-      throw mappedFailure({ category: 'network', cause });
+    if (options?.signal !== undefined) {
+      callerListener.fn = (): void => {
+        if (abortOwner === undefined) {
+          abortOwner = 'caller';
+          cancelActiveReader();
+          composedController.abort();
+        }
+      };
+      options.signal.addEventListener('abort', callerListener.fn, { once: true });
     }
 
     try {
-      const text = await parseProviderResponse(response);
-      return { text };
-    } catch (cause) {
-      if (cause instanceof Error && 'provider' in cause) {
-        throw cause;
+      // Check after listener registration so an abort during local preparation is
+      // observed even though AbortSignal does not replay an already-fired event.
+      if (isSignalAborted(options?.signal)) {
+        callerListener.fn?.();
       }
-      throw mappedFailure({ category: 'network', cause });
+      if (abortOwner === 'caller') {
+        throw mappedFailure({ category: 'cancelled', code: 'CALLER_CANCELLED' });
+      }
+
+      timerState.handle = setTimeout(() => {
+        if (abortOwner === undefined) {
+          abortOwner = 'timer';
+          cancelActiveReader();
+          composedController.abort();
+        }
+      }, this.config.requestTimeoutSeconds * 1000);
+
+      // 10. Single fetch with manual redirect, no attribution, composed signal.
+      let response: Response;
+      try {
+        response = await this.fetchFn(this.config.baseUrl.toString(), {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.config.apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body,
+          redirect: 'manual',
+          signal: composedController.signal
+        });
+      } catch (cause) {
+        if (abortOwner === 'caller') {
+          throw mappedFailure({ category: 'cancelled', code: 'CALLER_CANCELLED', cause });
+        }
+        if (abortOwner === 'timer') {
+          throw mappedFailure({ category: 'timeout', code: 'ADAPTER_TIMEOUT', cause });
+        }
+        throw mappedFailure({ category: 'network', cause });
+      }
+
+      // 11. Reject every 3xx before bounded reading.
+      if (is3xx(response.status)) {
+        throw mappedFailure({ category: 'unknown', status: response.status });
+      }
+
+      // 12. Bounded incremental read via the active stream reader (no whole-body helpers).
+      const text = await readBoundedResponse(
+        response,
+        this.config.maxResponseBytes,
+        activeReaderHolder
+      );
+
+      // 12b. After a cancel, the body reader resolves its pending read() with done=true
+      // (per Web Streams spec) and the bounded reader returns successfully with partial
+      // text. Propagate the owned abort identity here so caller/timer ownership is
+      // honored even when the body read did not throw.
+      if (abortOwner === 'caller') {
+        throw mappedFailure({ category: 'cancelled', code: 'CALLER_CANCELLED' });
+      }
+      if (abortOwner === 'timer') {
+        throw mappedFailure({ category: 'timeout', code: 'ADAPTER_TIMEOUT' });
+      }
+
+      // 13. Parse and map.
+      const result = await parseProviderResponse(response, text);
+      return { text: result };
+    } catch (error) {
+      if (error instanceof Error && 'provider' in error) {
+        throw error;
+      }
+      if (abortOwner === 'caller') {
+        throw mappedFailure({ category: 'cancelled', code: 'CALLER_CANCELLED', cause: error });
+      }
+      if (abortOwner === 'timer') {
+        throw mappedFailure({ category: 'timeout', code: 'ADAPTER_TIMEOUT', cause: error });
+      }
+      throw mappedFailure({ category: 'network', cause: error });
+    } finally {
+      // 14. Always clear timer, remove caller listener, and release any active reader.
+      if (timerState.handle !== null) {
+        clearTimeout(timerState.handle);
+      }
+      if (callerListener.fn !== null && options?.signal !== undefined) {
+        options.signal.removeEventListener('abort', callerListener.fn);
+      }
+      if (activeReaderHolder.current !== null) {
+        try {
+          await activeReaderHolder.current.cancel();
+        } catch {
+          // reader may already be closed
+        }
+        try {
+          activeReaderHolder.current.releaseLock();
+        } catch {
+          // reader may already be released
+        }
+      }
     }
   }
 }
