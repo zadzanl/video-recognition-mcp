@@ -1,11 +1,11 @@
 /**
  * Service for interacting with Google's Gemini API
  * status: active
- * phase: checkpoint-3-legacy-model-bridge
+ * phase: checkpoint-4-gemini-adapter
  * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-02
- * agent_notes: "Temporary omitted-model bridge while live tools remain GeminiService-injected."
- * insights: "Remove the bridge at checkpoint 7 once no direct-service caller requires it."
+ * last_modified: 2026-08-03
+ * agent_notes: "Throwing generation seam and owned video-timeout identity; legacy wrapper remains compatible."
+ * insights: "processFileOrThrow preserves original throws; remove the omitted-model bridge at checkpoint 7."
  */
 
 import { 
@@ -22,6 +22,8 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 
 const log = createLogger('GeminiService');
+
+export class GeminiVideoProcessingTimeoutError extends Error {}
 
 export class GeminiService {
   private readonly client: GoogleGenAI;
@@ -101,7 +103,9 @@ export class GeminiService {
     while (currentFile.state === FileState.PROCESSING) {
       // Check if we've exceeded the maximum wait time
       if (Date.now() - startTime > maxWaitTimeMs) {
-        throw new Error(`Timeout waiting for video processing: ${file.name}`);
+        throw new GeminiVideoProcessingTimeoutError(
+          `Timeout waiting for video processing: ${file.name}`
+        );
       }
       
       // Wait 2 seconds before checking again
@@ -242,30 +246,38 @@ export class GeminiService {
   }
 
   /**
-   * Process a file with Gemini API
+   * Process a file with Gemini API and preserve generation failures
+   */
+  async processFileOrThrow(
+    file: GeminiFile,
+    prompt: string,
+    modelName: string
+  ): Promise<GeminiResponse> {
+    log.debug(`Processing file with model ${modelName}`);
+    log.verbose('Processing with parameters', JSON.stringify({ file, prompt, modelName }));
+
+    const response = await this.client.models.generateContent({
+      model: modelName,
+      contents: createUserContent([
+        createPartFromUri(file.uri, file.mimeType),
+        prompt
+      ])
+    });
+
+    log.debug('Received response from Gemini API');
+    log.verbose('Gemini API response', JSON.stringify(response));
+
+    return {
+      text: response.text || ''
+    };
+  }
+
+  /**
+   * Compatibility wrapper for direct service callers
    */
   async processFile(file: GeminiFile, prompt: string, modelName?: string): Promise<GeminiResponse> {
     try {
-      const effectiveModelName = modelName ?? DEFAULT_GEMINI_MODEL;
-      log.debug(`Processing file with model ${effectiveModelName}`);
-      log.verbose('Processing with parameters', JSON.stringify({ file, prompt, modelName: effectiveModelName }));
-      
-      const response = await this.client.models.generateContent({
-        model: effectiveModelName,
-        contents: createUserContent([
-          createPartFromUri(file.uri, file.mimeType),
-          prompt
-        ])
-      });
-      
-      log.debug('Received response from Gemini API');
-      log.verbose('Gemini API response', JSON.stringify(response));
-      
-      const responseText = response.text || '';
-      
-      return {
-        text: responseText
-      };
+      return await this.processFileOrThrow(file, prompt, modelName ?? DEFAULT_GEMINI_MODEL);
     } catch (error) {
       log.error('Error processing file with Gemini API', error);
       return {
