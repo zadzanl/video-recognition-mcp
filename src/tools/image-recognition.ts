@@ -2,7 +2,6 @@
  * Image recognition tool for MCP server
  */
 
-import { z } from 'zod';
 import { createLogger } from '../utils/logger.js';
 import { GeminiService } from '../services/gemini.js';
 import { ImageRecognitionParamsSchema } from '../types/index.js';

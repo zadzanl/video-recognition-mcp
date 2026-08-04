@@ -2,7 +2,6 @@
  * Audio recognition tool for MCP server
  */
 
-import { z } from 'zod';
 import { createLogger } from '../utils/logger.js';
 import { GeminiService } from '../services/gemini.js';
 import { AudioRecognitionParamsSchema } from '../types/index.js';

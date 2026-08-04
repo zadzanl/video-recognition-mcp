@@ -3,7 +3,7 @@
  */
 
 import { z } from 'zod';
-import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 /**
  * Common parameters for all recognition tools
@@ -40,8 +40,8 @@ export type AudioRecognitionParams = z.infer<typeof AudioRecognitionParamsSchema
 export interface ToolDefinition {
   name: string;
   description: string;
-  inputSchema: z.ZodObject<any>;
-  callback: (args: any) => Promise<CallToolResult>;
+  inputSchema: z.ZodObject<z.ZodRawShape>;
+  callback: (args: unknown) => Promise<CallToolResult>;
 }
 
 /**

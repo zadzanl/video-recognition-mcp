@@ -2,10 +2,9 @@
  * Video recognition tool for MCP server
  */
 
-import { z } from 'zod';
 import { createLogger } from '../utils/logger.js';
 import { GeminiService } from '../services/gemini.js';
-import { VideoRecognitionParamsSchema, FileState } from '../types/index.js';
+import { VideoRecognitionParamsSchema } from '../types/index.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { VideoRecognitionParams } from '../types/index.js';
 import * as fs from 'node:fs';

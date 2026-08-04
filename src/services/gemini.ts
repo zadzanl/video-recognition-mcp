@@ -18,7 +18,7 @@ const log = createLogger('GeminiService');
 
 export class GeminiService {
   private readonly client: GoogleGenAI;
-  private fileCache: Map<string, CachedFile> = new Map();
+  private fileCache = new Map<string, CachedFile>();
   private readonly cacheExpiration = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
 
   constructor(config: GeminiConfig) {
@@ -136,8 +136,8 @@ export class GeminiService {
       log.debug(`File checksum: ${checksum}`);
       
       // Check if file is in cache and still valid
-      if (this.isCacheValid(checksum)) {
-        const cachedFile = this.fileCache.get(checksum)!;
+      const cachedFile = this.fileCache.get(checksum);
+      if (cachedFile && this.isCacheValid(checksum)) {
         log.info(`Using cached file: ${cachedFile.name}`);
         
         // Return cached file info
@@ -200,12 +200,12 @@ export class GeminiService {
         
         // Update cache with processed file
         this.fileCache.set(checksum, {
-          fileId: processedFile.name!,
+          fileId: processedFile.name,
           checksum,
           uri: processedFile.uri,
           mimeType: processedFile.mimeType,
-          name: processedFile.name!,
-          state: processedFile.state!,
+          name: processedFile.name,
+          state: processedFile.state,
           timestamp: Date.now()
         });
         
