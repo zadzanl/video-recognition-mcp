@@ -10,7 +10,7 @@
     "dev": "tsc -w & node --watch dist/index.js",
     "debug": "tsc & npx @modelcontextprotocol/inspector node dist/index.js",
     "lint": "eslint src",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "tsc && node --test dist/tests/baseline.test.js dist/tests/transport-boundary.test.js"
   },
   "keywords": [
     "mcp",
