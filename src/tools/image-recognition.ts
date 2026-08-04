@@ -1,5 +1,11 @@
 /**
  * Image recognition tool for MCP server
+ * status: active
+ * phase: checkpoint-3-schema-default-ownership
+ * sprint: provider-foundation-first-sprint
+ * last_modified: 2026-08-02
+ * agent_notes: "Forwards parsed prompt/model values directly to the retained GeminiService seam."
+ * insights: "Schema owns the sole prompt default; provider rewiring remains deferred."
  */
 
 import { createLogger } from '../utils/logger.js';
@@ -33,17 +39,13 @@ export const createImageRecognitionTool = (geminiService: GeminiService) => {
           throw new Error(`Unsupported image format: ${ext}. Supported formats are: .jpg, .jpeg, .png, .webp`);
         }
         
-        // Default prompt if not provided
-        const prompt = args.prompt || 'Describe this image';
-        const modelName = args.modelname || 'gemini-2.0-flash';
-        
         // Upload the file
         log.info('Uploading image file...');
         const file = await geminiService.uploadFile(args.filepath);
         
         // Process with Gemini
         log.info('Generating content from image...');
-        const result = await geminiService.processFile(file, prompt, modelName);
+        const result = await geminiService.processFile(file, args.prompt, args.modelname);
         
         if (result.isError) {
           log.error(`Error in image recognition: ${result.text}`);

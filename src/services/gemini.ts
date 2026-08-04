@@ -1,5 +1,11 @@
 /**
  * Service for interacting with Google's Gemini API
+ * status: active
+ * phase: checkpoint-3-legacy-model-bridge
+ * sprint: provider-foundation-first-sprint
+ * last_modified: 2026-08-02
+ * agent_notes: "Temporary omitted-model bridge while live tools remain GeminiService-injected."
+ * insights: "Remove the bridge at checkpoint 7 once no direct-service caller requires it."
  */
 
 import { 
@@ -8,6 +14,7 @@ import {
   createPartFromUri
 } from '@google/genai';
 import { createLogger } from '../utils/logger.js';
+import { DEFAULT_GEMINI_MODEL } from './provider-config.js';
 import type { GeminiConfig, GeminiFile, GeminiResponse, CachedFile, ProcessedGeminiFile } from '../types/index.js';
 import { FileState } from '../types/index.js';
 import * as fs from 'node:fs';
@@ -237,13 +244,14 @@ export class GeminiService {
   /**
    * Process a file with Gemini API
    */
-  async processFile(file: GeminiFile, prompt: string, modelName: string): Promise<GeminiResponse> {
+  async processFile(file: GeminiFile, prompt: string, modelName?: string): Promise<GeminiResponse> {
     try {
-      log.debug(`Processing file with model ${modelName}`);
-      log.verbose('Processing with parameters', JSON.stringify({ file, prompt, modelName }));
+      const effectiveModelName = modelName ?? DEFAULT_GEMINI_MODEL;
+      log.debug(`Processing file with model ${effectiveModelName}`);
+      log.verbose('Processing with parameters', JSON.stringify({ file, prompt, modelName: effectiveModelName }));
       
       const response = await this.client.models.generateContent({
-        model: modelName,
+        model: effectiveModelName,
         contents: createUserContent([
           createPartFromUri(file.uri, file.mimeType),
           prompt

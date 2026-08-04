@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: checkpoint-2-baseline-characterization
+ * phase: checkpoint-3-activated-characterization
  * sprint: provider-foundation-first-sprint
  * last_modified: 2026-08-02
- * agent_notes: "Characterizes existing tool contracts through credential-free GeminiService fakes."
- * insights: "Current schemas own the shared omitted-prompt default; tool callbacks preserve three distinct MCP error prefixes."
+ * agent_notes: "Characterizes tool contracts and checkpoint-3 default ownership through credential-free fakes."
+ * insights: "Schema supplies the prompt default; omitted model reaches GeminiService as undefined."
  */
 
 import assert from 'node:assert/strict';
@@ -29,7 +29,7 @@ interface FakeCalls {
   processed: {
     file: GeminiFile;
     prompt: string;
-    modelName: string;
+    modelName: string | undefined;
   }[];
 }
 
@@ -63,7 +63,7 @@ const createFakeService = (behavior: FakeBehavior = {}): {
     processFile: async (
       file: GeminiFile,
       prompt: string,
-      modelName: string
+      modelName?: string
     ): Promise<GeminiResponse> => {
       calls.processed.push({ file, prompt, modelName });
       return behavior.processResult ?? { text: 'recognized fixture' };
@@ -114,6 +114,23 @@ test('schemas default an omitted prompt to exactly Describe this content', () =>
     const parsed = tool.inputSchema.parse({ filepath: `fixture${toolCase.extension}` });
 
     assert.equal(parsed.prompt, 'Describe this content');
+    assert.equal(parsed.modelname, undefined);
+  }
+});
+
+test('tools forward schema prompt default and omitted model without local fallbacks', async () => {
+  for (const [index, toolCase] of toolCases.entries()) {
+    const filepath = join(temporaryDirectory, `omitted-values-${index}${toolCase.extension}`);
+    await writeFile(filepath, 'fixture');
+    const { service, calls } = createFakeService();
+    const tool = toolCase.createTool(service);
+    const args = tool.inputSchema.parse({ filepath });
+
+    await tool.callback(args);
+
+    assert.equal(calls.processed.length, 1);
+    assert.equal(calls.processed[0]?.prompt, 'Describe this content');
+    assert.equal(calls.processed[0]?.modelName, undefined);
   }
 });
 

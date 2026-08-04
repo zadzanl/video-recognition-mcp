@@ -1,5 +1,11 @@
 /**
  * Audio recognition tool for MCP server
+ * status: active
+ * phase: checkpoint-3-schema-default-ownership
+ * sprint: provider-foundation-first-sprint
+ * last_modified: 2026-08-02
+ * agent_notes: "Forwards parsed prompt/model values directly to the retained GeminiService seam."
+ * insights: "Schema owns the sole prompt default; provider rewiring remains deferred."
  */
 
 import { createLogger } from '../utils/logger.js';
@@ -33,17 +39,13 @@ export const createAudioRecognitionTool = (geminiService: GeminiService) => {
           throw new Error(`Unsupported audio format: ${ext}. Supported formats are: .mp3, .wav, .ogg`);
         }
         
-        // Default prompt if not provided
-        const prompt = args.prompt || 'Describe this audio';
-        const modelName = args.modelname || 'gemini-2.0-flash';
-        
         // Upload the file
         log.info('Uploading audio file...');
         const file = await geminiService.uploadFile(args.filepath);
         
         // Process with Gemini
         log.info('Generating content from audio...');
-        const result = await geminiService.processFile(file, prompt, modelName);
+        const result = await geminiService.processFile(file, args.prompt, args.modelname);
         
         if (result.isError) {
           log.error(`Error in audio recognition: ${result.text}`);
