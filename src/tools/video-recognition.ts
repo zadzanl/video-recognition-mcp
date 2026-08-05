@@ -1,68 +1,45 @@
 /**
  * Video recognition tool for MCP server
  * status: active
- * phase: checkpoint-3-schema-default-ownership
+ * phase: phase-5-tool-server-wiring
  * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-02
- * agent_notes: "Forwards parsed prompt/model values directly to the retained GeminiService seam."
- * insights: "Schema owns the sole prompt default; provider rewiring remains deferred."
+ * last_modified: 2026-08-06
+ * agent_notes: "Tool boundary is provider-neutral; file and format validation moved into provider adapters."
+ * insights: "Schema owns the sole prompt default; providers throw ProviderFailure instead of returning isError envelopes. Cause values never cross the MCP boundary."
  */
 
 import { createLogger } from '../utils/logger.js';
-import { GeminiService } from '../services/gemini.js';
+import { isProviderFailure } from '../services/provider-failure.js';
 import { VideoRecognitionParamsSchema } from '../types/index.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { VideoRecognitionParams } from '../types/index.js';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
+import type { RecognitionProvider, RecognitionRequest } from '../types/provider.js';
 
 const log = createLogger('VideoRecognitionTool');
 
-export const createVideoRecognitionTool = (geminiService: GeminiService) => {
+export const createVideoRecognitionTool = (provider: RecognitionProvider) => {
   return {
     name: 'video_recognition',
     description: 'Analyze and describe videos using Google Gemini AI',
     inputSchema: VideoRecognitionParamsSchema,
-    callback: async (args: VideoRecognitionParams): Promise<CallToolResult> => {
+    callback: async (args: VideoRecognitionParams, extra: { signal: AbortSignal }): Promise<CallToolResult> => {
       try {
         log.info(`Processing video recognition request for file: ${args.filepath}`);
         log.verbose('Video recognition request', JSON.stringify(args));
-        
-        // Verify file exists
-        if (!fs.existsSync(args.filepath)) {
-          throw new Error(`Video file not found: ${args.filepath}`);
-        }
-        
-        // Verify file is a video
-        const ext = path.extname(args.filepath).toLowerCase();
-        if (ext !== '.mp4' && ext !== '.mpeg' && ext !== '.mov' && ext !== '.avi' && ext !== '.webm') {
-          throw new Error(`Unsupported video format: ${ext}. Supported formats are: .mp4, .mpeg, .mov, .avi, .webm`);
-        }
-        
-        // Upload the file - this will handle waiting for video processing
-        log.info('Uploading and processing video file...');
-        const file = await geminiService.uploadFile(args.filepath);
-        
-        // Process with Gemini
-        log.info('Video processing complete, generating content...');
-        const result = await geminiService.processFile(file, args.prompt, args.modelname);
-        
-        if (result.isError) {
-          log.error(`Error in video recognition: ${result.text}`);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: result.text
-              }
-            ],
-            isError: true
-          };
-        }
-        
+
+        const request: RecognitionRequest = {
+          filepath: args.filepath,
+          prompt: args.prompt,
+          mediaKind: 'video',
+          model: args.modelname
+        };
+
+        log.info('Generating content from video...');
+        const result = await provider.recognize(request, { signal: extra.signal });
+
         log.info('Video recognition completed successfully');
         log.verbose('Video recognition result', JSON.stringify(result));
-        
+
         return {
           content: [
             {
@@ -73,8 +50,10 @@ export const createVideoRecognitionTool = (geminiService: GeminiService) => {
         };
       } catch (error) {
         log.error('Error in video recognition tool', error);
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        
+        const errorMessage = isProviderFailure(error)
+          ? error.safeMessage
+          : error instanceof Error ? error.message : String(error);
+
         return {
           content: [
             {

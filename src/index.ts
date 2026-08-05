@@ -1,9 +1,20 @@
 /**
  * Entry point for the MCP media processing server
+ * status: active
+ * phase: phase-5-tool-server-wiring
+ * sprint: provider-foundation-first-sprint
+ * last_modified: 2026-08-06
+ * agent_notes: "Startup constructs exactly one RecognitionProvider from environment selection."
+ * insights: "Gemini wraps the retained GeminiService in an adapter; openai-compatible manages its own HTTP. Transport and port parsing are unchanged."
  */
 
 import { Server } from './server.js';
 import { createLogger, LogLevel, Logger } from './utils/logger.js';
+import { loadRecognitionProviderConfig } from './services/provider-config.js';
+import { GeminiService } from './services/gemini.js';
+import { GeminiRecognitionProvider } from './services/gemini-recognition-provider.js';
+import { OpenAICompatibleRecognitionProvider } from './services/openai-compatible-recognition-provider.js';
+import type { RecognitionProvider } from './types/provider.js';
 import type { ServerConfig } from './server.js';
 
 const log = createLogger('Main');
@@ -15,24 +26,28 @@ Logger.setLogLevel(logLevel as LogLevel);
 /**
  * Load configuration from environment variables
  */
-function loadConfig(): ServerConfig {
-  // Check for required environment variables
-  const apiKey = process.env.GOOGLE_API_KEY;
-  if (!apiKey) {
-    throw new Error('GOOGLE_API_KEY environment variable is required');
+async function loadConfig(): Promise<ServerConfig> {
+  // Load the selected provider configuration
+  const providerConfig = await loadRecognitionProviderConfig(process.env);
+
+  // Construct the selected provider
+  let provider: RecognitionProvider;
+  if (providerConfig.provider === 'gemini') {
+    const service = new GeminiService({ apiKey: providerConfig.apiKey });
+    provider = new GeminiRecognitionProvider(service, providerConfig);
+  } else {
+    provider = new OpenAICompatibleRecognitionProvider(providerConfig);
   }
 
   // Determine transport type
   const transportType = process.env.TRANSPORT_TYPE === 'sse' ? 'sse' : 'stdio';
-  
+
   // Parse port if provided
   const portStr = process.env.PORT;
   const port = portStr ? parseInt(portStr, 10) : undefined;
-  
+
   return {
-    gemini: {
-      apiKey
-    },
+    provider,
     transport: transportType,
     port
   };
@@ -44,9 +59,10 @@ function loadConfig(): ServerConfig {
 async function main(): Promise<void> {
   try {
     log.info('Starting MCP media processing server');
-    
+
     // Load configuration
-    const config = loadConfig();
+    const config = await loadConfig();
+    log.info(`Using provider: ${config.provider.constructor.name}`);
     log.info(`Using transport: ${config.transport}`);
     
     // Create and start server
