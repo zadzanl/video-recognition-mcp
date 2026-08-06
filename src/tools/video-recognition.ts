@@ -20,7 +20,7 @@ const log = createLogger('VideoRecognitionTool');
 export const createVideoRecognitionTool = (provider: RecognitionProvider) => {
   return {
     name: 'video_recognition',
-    description: 'Analyze and describe videos using Google Gemini AI',
+    description: 'Analyze and describe videos using the configured recognition provider',
     inputSchema: VideoRecognitionParamsSchema,
     callback: async (args: VideoRecognitionParams, extra: { signal: AbortSignal }): Promise<CallToolResult> => {
       try {

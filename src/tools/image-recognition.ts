@@ -20,7 +20,7 @@ const log = createLogger('ImageRecognitionTool');
 export const createImageRecognitionTool = (provider: RecognitionProvider) => {
   return {
     name: 'image_recognition',
-    description: 'Analyze and describe images using Google Gemini AI',
+    description: 'Analyze and describe images using the configured recognition provider',
     inputSchema: ImageRecognitionParamsSchema,
     callback: async (args: ImageRecognitionParams, extra: { signal: AbortSignal }): Promise<CallToolResult> => {
       try {

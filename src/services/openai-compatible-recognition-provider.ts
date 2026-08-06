@@ -6,7 +6,7 @@
  * agent_notes: "Implements the OpenAI-compatible recognition provider, handling media conversion, bounded reading, and request validation."
  * insights: "Abort ownership is managed by a race between a caller signal and a local timer. Bounded reading stops exactly at the byte cap to prevent memory exhaustion. Identifiers and paths are validated before any network or file I/O."
  *
- * Known ceiling: This adapter currently runs standalone. End-to-end wiring (server and tools) will be handled in a later phase. Concurrent filesystem mutations during reads are not mitigated.
+ * Known ceiling: Concurrent filesystem mutations during reads are not mitigated; upgrade by moving media reads behind a stable-file snapshot abstraction if that threat enters scope.
  */
 
 import { readFile, realpath, stat } from 'node:fs/promises';

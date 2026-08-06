@@ -40,7 +40,7 @@ export class Server {
 
     // Create MCP server
     this.mcpServer = new McpServer({
-      name: 'media-processing',
+      name: 'mcp-video-recognition',
       version: '1.0.0'
     });
 

@@ -20,7 +20,7 @@ const log = createLogger('AudioRecognitionTool');
 export const createAudioRecognitionTool = (provider: RecognitionProvider) => {
   return {
     name: 'audio_recognition',
-    description: 'Analyze and transcribe audio using Google Gemini AI',
+    description: 'Analyze and transcribe audio using the configured recognition provider',
     inputSchema: AudioRecognitionParamsSchema,
     callback: async (args: AudioRecognitionParams, extra: { signal: AbortSignal }): Promise<CallToolResult> => {
       try {

@@ -3,7 +3,7 @@
  * phase: checkpoint-3-startup-configuration
  * sprint: provider-foundation-first-sprint
  * last_modified: 2026-08-02
- * agent_notes: "Standalone env-in/config-out loader; live startup invocation is deferred to checkpoint 7."
+ * agent_notes: "Environment-to-config loader invoked at startup before provider construction."
  * insights: "Only the selected provider is validated; roots are canonicalized at startup without requested-file access."
  */
 

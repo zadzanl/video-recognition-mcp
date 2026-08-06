@@ -1,5 +1,5 @@
 /**
- * Entry point for the MCP media processing server
+ * Entry point for the MCP video recognition server
  * status: active
  * phase: phase-5-tool-server-wiring
  * sprint: provider-foundation-first-sprint
@@ -58,7 +58,7 @@ async function loadConfig(): Promise<ServerConfig> {
  */
 async function main(): Promise<void> {
   try {
-    log.info('Starting MCP media processing server');
+    log.info('Starting MCP video recognition server');
 
     // Load configuration
     const config = await loadConfig();
