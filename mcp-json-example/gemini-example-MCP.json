@@ -8,7 +8,7 @@
     }
   ],
   "servers": {
-    "video-recognition": {
+    "media-processing": {
       "type": "stdio",
       "command": "node",
       "args": [

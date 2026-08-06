@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "video-recognition": {
+    "media-processing": {
       "command": "node",
       "args": [
         "C:/absolute/path/to/video-recognition-mcp/dist/index.js"

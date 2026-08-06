@@ -273,7 +273,7 @@ describe('RateLimitTracker state persistence and safety', () => {
   let tempTrackerFile: string;
 
   before(() => {
-    tempTrackerFile = process.env.RATE_LIMIT_TRACKER_PATH || path.join(os.tmpdir(), 'mcp-video-recognition-rate-limits.json');
+    tempTrackerFile = process.env.RATE_LIMIT_TRACKER_PATH || path.join(os.tmpdir(), 'mcp-media-processing-rate-limits.json');
   });
 
   it('persists requests in tracker state file without leaking API keys', () => {

@@ -1,4 +1,4 @@
-# MCP Video Recognition Server
+# MCP Media Processing Server
 
 An MCP (Model Context Protocol) server that provides tools for image, audio, and video recognition. It supports Google Gemini by default and can use a configurable OpenAI-compatible provider for image, video, and audio recognition (the provider/model must support the requested media modality), such as OpenRouter or Xiaomi MiMo's OpenAI-compatible endpoint.
 
@@ -60,7 +60,7 @@ An MCP (Model Context Protocol) server that provides tools for image, audio, and
     }
   ],
   "servers": {
-    "video-recognition": {
+    "media-processing": {
       "type": "stdio",
       "command": "node",
       "args": [

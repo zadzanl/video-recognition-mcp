@@ -72,7 +72,7 @@ export class RateLimitTracker {
 
   constructor(customLimitsPath?: string) {
     const envPath = process.env.RATE_LIMIT_TRACKER_PATH;
-    this.stateFilePath = envPath ? envPath : path.join(os.tmpdir(), 'mcp-video-recognition-rate-limits.json');
+    this.stateFilePath = envPath ? envPath : path.join(os.tmpdir(), 'mcp-media-processing-rate-limits.json');
     this.limitsFilePath = customLimitsPath ?? path.join(process.cwd(), 'config', 'throttling-limits.json');
     this.loadLimits();
   }

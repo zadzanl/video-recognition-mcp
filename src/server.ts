@@ -63,7 +63,7 @@ export class Server {
    */
   private createMcpServer(): McpServer {
     const mcpServer = new McpServer({
-      name: 'mcp-video-recognition',
+      name: 'media-processing',
       version: '1.0.0'
     });
 

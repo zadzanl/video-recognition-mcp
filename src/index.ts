@@ -1,5 +1,5 @@
 /**
- * Entry point for the MCP video recognition server
+ * Entry point for the MCP media processing server
  */
 
 import { Server } from './server.js';
@@ -45,7 +45,7 @@ function normalizeEnvValue(value: string | undefined): string | undefined {
  */
 async function main(): Promise<void> {
   try {
-    log.info('Starting MCP video recognition server');
+    log.info('Starting MCP media processing server');
     
     // Load configuration
     const config = loadConfig();

@@ -1,5 +1,5 @@
 {
-  "name": "mcp-video-recognition",
+  "name": "media-processing-mcp",
   "version": "1.0.0",
   "description": "MCP server for Google Gemini and OpenAI-compatible image, audio, and video recognition",
   "main": "dist/index.js",
