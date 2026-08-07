@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: change-b-group-2-error-classification
+ * phase: change-b-groups-4-5-recovery
  * sprint: gemini-model-fallback-and-rate-limit-recovery
  * last_modified: 2026-08-07
- * agent_notes: "Owns the only raw Gemini SDK error-envelope inspection boundary."
- * insights: "SDK 0.9.0 transport identities are erased, so the structured transport capability set is intentionally empty. Parsing is capped at 65,536 UTF-8 bytes and fails closed."
+ * agent_notes: "Owns the only raw Gemini SDK error-envelope inspection boundary, including exact retry timing."
+ * insights: "SDK 0.9.0 transport identities are erased. Retry timing is accepted only from direct error.details[0].retryDelay using fixed-three-decimal seconds and never changes eligibility."
  */
 
 import type { ProviderFailure } from '../types/provider.js';
@@ -54,6 +54,23 @@ const unknown = (cause: unknown): NormalizedGeminiFailure => ({
 
 const direct = (value: Record<string, unknown>, key: string): unknown =>
   Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
+
+const parseRetryDelayMs = (errorRecord: Record<string, unknown>): number | undefined => {
+  const details = direct(errorRecord, 'details');
+  if (!Array.isArray(details) || details.length === 0) return undefined;
+  const first = details[0];
+  if (typeof first !== 'object' || first === null || Array.isArray(first)) return undefined;
+  const retryDelay = direct(first as Record<string, unknown>, 'retryDelay');
+  if (typeof retryDelay !== 'string') return undefined;
+  const match = /^([0-9]+)\.([0-9]{3})s$/u.exec(retryDelay);
+  if (match === null) return undefined;
+  const seconds = Number(match[1]);
+  const milliseconds = Number(match[2]);
+  if (!Number.isSafeInteger(seconds) || !Number.isSafeInteger(milliseconds)) return undefined;
+  if (seconds > Math.floor((Number.MAX_SAFE_INTEGER - milliseconds) / 1000)) return undefined;
+  const result = seconds * 1000 + milliseconds;
+  return Number.isSafeInteger(result) && result >= 0 ? result : undefined;
+};
 
 const categoryForStatus = (status: number): ProviderFailure['category'] => {
   if (status === 400 || status === 404 || status === 405 || status === 409 || status === 410 || status === 413 || status === 415 || status === 422) return 'invalid-request';
@@ -124,6 +141,7 @@ export const normalizeGeminiGenerationFailure = (cause: unknown): NormalizedGemi
   if (providerCode !== undefined && typeof providerCode !== 'string') return malformed(cause);
 
   const category = categoryForStatus(status);
+  const retryAfterMs = parseRetryDelayMs(errorRecord);
   return {
     envelopeState: 'usable',
     failure: createProviderFailure({
@@ -132,6 +150,7 @@ export const normalizeGeminiGenerationFailure = (cause: unknown): NormalizedGemi
       safeMessage: safeMessageForCategory(category),
       status,
       ...(typeof providerCode === 'string' ? { code: providerCode } : {}),
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       cause
     })
   };

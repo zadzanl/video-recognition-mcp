@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: change-b-group-2-error-classification
+ * phase: change-b-groups-4-5-recovery
  * sprint: gemini-model-fallback-and-rate-limit-recovery
  * last_modified: 2026-08-07
- * agent_notes: "Deterministic hostile-input matrix for the exact @google/genai 0.9.0 envelope boundary."
- * insights: "Only exact structured status/code and owned ADAPTER_TIMEOUT authorize fallback; prose, causes, and erased transport tokens never do."
+ * agent_notes: "Deterministic hostile-input and retry-timing matrix for the exact @google/genai 0.9.0 envelope boundary."
+ * insights: "Only exact structured status/code and owned ADAPTER_TIMEOUT authorize fallback. Fixed-three-decimal direct retryDelay is diagnostic timing only."
  */
 
 import assert from 'node:assert/strict';
@@ -182,4 +182,46 @@ test('pure classifier fails closed on hostile normalized fields', () => {
   const hostile = {} as NormalizedGeminiFailure;
   Object.defineProperty(hostile, 'envelopeState', { get: () => { throw new Error('no'); } });
   assert.deepEqual(classifyNormalizedGeminiFailure(hostile), { kind: 'fail-fast' });
+});
+
+test('direct fixed-three-decimal retry delay is normalized without changing eligibility', () => {
+  for (const [retryDelay, expected] of [['1.250s', 1250], ['0.000s', 0]] as const) {
+    const withTiming = normalizeGeminiGenerationFailure(sdkError(429, 'RESOURCE_EXHAUSTED', {
+      details: [{ retryDelay }]
+    }));
+    const withoutTiming = normalizeGeminiGenerationFailure(sdkError(429));
+    assert.equal(withTiming.failure.retryAfterMs, expected);
+    assert.deepEqual(
+      classifyNormalizedGeminiFailure(withTiming),
+      classifyNormalizedGeminiFailure(withoutTiming)
+    );
+  }
+});
+
+test('unsupported retry delay values and locations are omitted without rejecting the envelope', () => {
+  const invalidValues: unknown[] = [
+    '1.25s', '1.2500s', '-1.000s', ' 1.250s', '1.250s ', '1e3s',
+    '1250ms', 'Infinitys', Number.NaN, Infinity, -1, null, {}, [],
+    `${Number.MAX_SAFE_INTEGER}.000s`
+  ];
+  for (const retryDelay of invalidValues) {
+    const result = normalizeGeminiGenerationFailure(sdkError(429, 'RESOURCE_EXHAUSTED', {
+      details: [{ retryDelay }]
+    }));
+    assert.equal(result.envelopeState, 'usable');
+    assert.equal(result.failure.retryAfterMs, undefined);
+    assert.equal(classifyNormalizedGeminiFailure(result).kind, 'fallback-eligible');
+  }
+  for (const extras of [
+    { retryDelay: '1.250s' },
+    { details: { retryDelay: '1.250s' } },
+    { details: [] },
+    { details: [null] },
+    { details: [{ other: '1.250s' }] },
+    { details: [{}, { retryDelay: '1.250s' }] }
+  ]) {
+    const result = normalizeGeminiGenerationFailure(sdkError(429, 'RESOURCE_EXHAUSTED', extras));
+    assert.equal(result.envelopeState, 'usable');
+    assert.equal(result.failure.retryAfterMs, undefined);
+  }
 });

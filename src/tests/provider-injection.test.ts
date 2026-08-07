@@ -1,14 +1,16 @@
 /**
  * status: active
- * phase: phase-5-tool-server-wiring
- * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-06
- * agent_notes: "Fake-provider contract tests for the tool boundary after Phase 5 provider injection."
- * insights: "Each tool must call recognize exactly once per invocation, forward the caller abort signal, and map failures without leaking cause values into MCP results."
+ * phase: change-b-groups-4-5-recovery
+ * sprint: gemini-model-fallback-and-rate-limit-recovery
+ * last_modified: 2026-08-07
+ * agent_notes: "Fake-provider tool tests plus startup source evidence for optional backup composition."
+ * insights: "Tools remain unchanged; Gemini startup owns one shared cooldown store and constructs the configured backup only inside the explicit enabled branch."
  */
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { createAudioRecognitionTool } from '../tools/audio-recognition.js';
 import { createImageRecognitionTool } from '../tools/image-recognition.js';
 import { createVideoRecognitionTool } from '../tools/video-recognition.js';
@@ -207,4 +209,15 @@ test('failure cause is not exposed in the MCP result', async () => {
       isError: true
     });
   }
+});
+
+test('Gemini startup composes one shared cooldown store and only the configured enabled backup', async () => {
+  const source = await readFile(path.resolve(process.cwd(), 'src/index.ts'), 'utf8');
+  assert.equal((source.match(/createProviderModelCooldownStore\(\)/gu) ?? []).length, 1);
+  assert.match(source, /providerConfig\.recovery\.backup\.enabled/u);
+  assert.match(source, /new OpenAICompatibleRecognitionProvider\(providerConfig\.recovery\.backup\.providerConfig\)/u);
+  assert.match(source, /new GeminiRecognitionProvider\(service, providerConfig, \{/u);
+  assert.match(source, /cooldowns,/u);
+  assert.match(source, /backupProvider/u);
+  assert.doesNotMatch(source, /GEMINI_BACKUP_MODEL|OPENROUTER_MODEL/u);
 });

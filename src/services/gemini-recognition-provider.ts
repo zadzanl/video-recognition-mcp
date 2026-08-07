@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: change-b-group-3-ordered-fallback
+ * phase: change-b-groups-4-5-recovery
  * sprint: gemini-model-recovery
  * last_modified: 2026-08-07
- * agent_notes: "Prepares media once, then delegates validated routes to the request-local recovery router."
- * insights: "Pin validation and allowlist checks remain pre-I/O. Raw SDK fields are classifier-only and preparation stays fail-fast. The recovery deadline begins after preparation; pins are one-element routes; production Gemini generation intentionally has no new timeout."
+ * agent_notes: "Prepares media once, then delegates validated routes to the cooldown-aware recovery router."
+ * insights: "One store is shared by each provider instance. Pin validation remains pre-I/O; pins bypass cooldown reads but transient pin failures update later unpinned calls."
  */
 
 import path from 'node:path';
@@ -20,9 +20,14 @@ import {
 import { createProviderFailure } from './provider-failure.js';
 import { normalizeGeminiGenerationFailure } from './gemini-error-classifier.js';
 import {
+  createProviderModelCooldownStore,
+  type ProviderModelCooldownStore
+} from './provider-cooldown-store.js';
+import {
   formatGeminiTerminalMessage,
   runPreparedGeminiRoute
 } from './gemini-recovery-router.js';
+import { canonicalizeContainedFile } from './openai-compatible-recognition-provider.js';
 
 const supportedExtensions = {
   image: new Set(['.jpg', '.jpeg', '.png', '.webp']),
@@ -50,14 +55,20 @@ const mapGeminiPreparationFailure = (cause: unknown): Error => {
 };
 
 export class GeminiRecognitionProvider implements RecognitionProvider {
+  private readonly cooldowns: ProviderModelCooldownStore;
+
   constructor(
     private readonly service: GeminiService,
     private readonly config: GeminiProviderConfig,
     private readonly runtime: {
       readonly now?: () => number;
-      readonly isCandidateEligible?: (model: string) => boolean;
+      readonly sleep?: (ms: number) => Promise<void>;
+      readonly cooldowns?: ProviderModelCooldownStore;
+      readonly backupProvider?: RecognitionProvider;
     } = {}
-  ) {}
+  ) {
+    this.cooldowns = runtime.cooldowns ?? createProviderModelCooldownStore();
+  }
 
   async recognize(request: RecognitionRequest, options?: ProviderCallOptions) {
     if (options?.signal?.aborted === true) {
@@ -95,24 +106,50 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
       });
     }
 
+    let canonicalFilepath = request.filepath;
+    if (this.config.recovery.backup.enabled) {
+      canonicalFilepath = await canonicalizeContainedFile(
+        request.filepath,
+        this.config.recovery.backup.providerConfig.allowedMediaRoots
+      );
+    }
+
     let file;
     try {
-      file = await this.service.uploadFile(request.filepath);
+      file = await this.service.uploadFile(canonicalFilepath);
     } catch (cause) {
       throw mapGeminiPreparationFailure(cause);
     }
     const now = this.runtime.now ?? Date.now;
+    const sleep = this.runtime.sleep ?? (async (ms: number) => {
+      await new Promise<void>(resolve => setTimeout(resolve, ms));
+    });
     const outcome = await runPreparedGeminiRoute({
       candidates: pin === undefined ? this.config.recovery.modelRoute : [requestedModel],
       pinned: pin !== undefined,
       maxAttempts: this.config.recovery.maxAttempts,
       deadlineSeconds: this.config.recovery.deadlineSeconds,
-      deadlineStartedAt: now()
+      deadlineStartedAt: now(),
+      baseBackoffMs: this.config.recovery.baseBackoffMs,
+      maxBackoffMs: this.config.recovery.maxBackoffMs,
+      cooldownSeconds: this.config.recovery.cooldownSeconds
     }, {
       now,
-      ...(this.runtime.isCandidateEligible === undefined
-        ? {}
-        : { isCandidateEligible: this.runtime.isCandidateEligible }),
+      sleep,
+      cooldowns: this.cooldowns,
+      ...(this.config.recovery.backup.enabled && this.runtime.backupProvider !== undefined
+        ? {
+            backup: {
+              provider: this.config.recovery.backup.providerConfig.providerLabel,
+              model: this.config.recovery.backup.providerConfig.model,
+              invoke: () => this.runtime.backupProvider!.recognize({
+                filepath: canonicalFilepath,
+                prompt: request.prompt,
+                mediaKind: request.mediaKind
+              }, options)
+            }
+          }
+        : {}),
       invokePreparedModel: async model => {
         try {
           const response = await this.service.processFileOrThrow(file, request.prompt, model);

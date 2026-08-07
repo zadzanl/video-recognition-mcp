@@ -21,7 +21,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
 import {
-  OpenAICompatibleRecognitionProvider
+  OpenAICompatibleRecognitionProvider,
+  canonicalizeContainedFile
 } from '../services/openai-compatible-recognition-provider.js';
 import type { OpenAICompatibleProviderConfig } from '../services/provider-config.js';
 import type {
@@ -1345,6 +1346,17 @@ test('canonical containment accepts a regular file directly inside an allowed ro
   const result = await provider.recognize(request({ filepath }));
   assert.deepEqual(result, { text: 'ok' });
   assert.equal(calls.length, 1);
+});
+
+test('canonical containment helper is exported as the adapter call-site implementation', async () => {
+  const filepath = await writeTempFile('exported-helper.jpg', Buffer.from('payload'));
+  assert.equal(await canonicalizeContainedFile(filepath, [tempRoot]), filepath);
+  const source = await readFile(
+    path.resolve(process.cwd(), 'src/services/openai-compatible-recognition-provider.ts'),
+    'utf8'
+  );
+  assert.match(source, /export const canonicalizeContainedFile = async/u);
+  assert.match(source, /await canonicalizeContainedFile\(/u);
 });
 
 test('canonical containment accepts a nested file below an allowed root', async () => {

@@ -1,11 +1,11 @@
 /**
  * Entry point for the MCP video recognition server
  * status: active
- * phase: phase-5-tool-server-wiring
- * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-06
- * agent_notes: "Startup constructs exactly one RecognitionProvider from environment selection."
- * insights: "Gemini wraps the retained GeminiService in an adapter; openai-compatible manages its own HTTP. Transport and port parsing are unchanged."
+ * phase: change-b-groups-4-5-recovery
+ * sprint: gemini-model-fallback-and-rate-limit-recovery
+ * last_modified: 2026-08-07
+ * agent_notes: "Startup constructs one top-level provider and one process-local cooldown store for Gemini recovery."
+ * insights: "Enabled Gemini backup reuses the complete Change A OpenAI-compatible config and provider; disabled backup constructs neither."
  */
 
 import { Server } from './server.js';
@@ -14,6 +14,7 @@ import { loadRecognitionProviderConfig } from './services/provider-config.js';
 import { GeminiService } from './services/gemini.js';
 import { GeminiRecognitionProvider } from './services/gemini-recognition-provider.js';
 import { OpenAICompatibleRecognitionProvider } from './services/openai-compatible-recognition-provider.js';
+import { createProviderModelCooldownStore } from './services/provider-cooldown-store.js';
 import type { RecognitionProvider } from './types/provider.js';
 import type { ServerConfig } from './server.js';
 
@@ -34,7 +35,14 @@ async function loadConfig(): Promise<ServerConfig> {
   let provider: RecognitionProvider;
   if (providerConfig.provider === 'gemini') {
     const service = new GeminiService({ apiKey: providerConfig.apiKey });
-    provider = new GeminiRecognitionProvider(service, providerConfig);
+    const cooldowns = createProviderModelCooldownStore();
+    const backupProvider = providerConfig.recovery.backup.enabled
+      ? new OpenAICompatibleRecognitionProvider(providerConfig.recovery.backup.providerConfig)
+      : undefined;
+    provider = new GeminiRecognitionProvider(service, providerConfig, {
+      cooldowns,
+      ...(backupProvider === undefined ? {} : { backupProvider })
+    });
   } else {
     provider = new OpenAICompatibleRecognitionProvider(providerConfig);
   }

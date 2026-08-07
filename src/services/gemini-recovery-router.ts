@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: change-b-group-3-ordered-fallback
+ * phase: change-b-groups-4-5-recovery
  * sprint: gemini-model-fallback-and-rate-limit-recovery
  * last_modified: 2026-08-07
- * agent_notes: "Request-local prepared-media router with a soft pre-start deadline and no in-flight cancellation race."
- * insights: "The injected invoker is the bounded test boundary; production Gemini generation intentionally has no independent adapter timeout. Group 4 may add sleep/random and cooldown-backed eligibility at this seam. Terminal model text uses complete escaped units, ASCII marker [...], and a 4096-byte cap."
+ * agent_notes: "Request-local prepared-media router with deterministic backoff, bounded cooldown, and soft pre-start gates."
+ * insights: "Clock, sleeper, cooldown state, and invoker are injected. Timing has no randomness: retryAfterMs replaces capped exponential delay when valid."
  */
 
 import type {
@@ -16,18 +16,23 @@ import {
   classifyNormalizedGeminiFailure,
   type NormalizedGeminiFailure
 } from './gemini-error-classifier.js';
+import type { ProviderModelCooldownStore } from './provider-cooldown-store.js';
+import { createProviderFailure, isProviderFailure } from './provider-failure.js';
 
-export interface StartedGeminiAttempt {
-  readonly provider: 'gemini';
+export interface StartedProviderAttempt {
+  readonly provider: string;
   readonly model: string;
   readonly attempt: number;
   readonly category: ProviderFailureCategory;
 }
 
+export type StartedGeminiAttempt = StartedProviderAttempt;
+
 export type GeminiTerminalReason =
   | 'route-exhausted'
   | 'deadline-terminated'
-  | 'envelope-unusable';
+  | 'envelope-unusable'
+  | 'backup-exhausted';
 
 export type GeminiRouteOutcome =
   | { readonly kind: 'success'; readonly result: RecognitionResult }
@@ -36,13 +41,19 @@ export type GeminiRouteOutcome =
       readonly kind: 'terminal';
       readonly reason: GeminiTerminalReason;
       readonly attemptsUsed: number;
-      readonly attempts: readonly StartedGeminiAttempt[];
+      readonly attempts: readonly StartedProviderAttempt[];
     };
 
 export interface GeminiRouterRuntime {
   readonly now: () => number;
+  readonly sleep: (ms: number) => Promise<void>;
+  readonly cooldowns: ProviderModelCooldownStore;
   readonly invokePreparedModel: (model: string) => Promise<RecognitionResult>;
-  readonly isCandidateEligible?: (model: string) => boolean;
+  readonly backup?: {
+    readonly provider: string;
+    readonly model: string;
+    readonly invoke: () => Promise<RecognitionResult>;
+  };
 }
 
 export interface GeminiRouteInput {
@@ -51,6 +62,9 @@ export interface GeminiRouteInput {
   readonly maxAttempts: number;
   readonly deadlineSeconds: number;
   readonly deadlineStartedAt: number;
+  readonly baseBackoffMs: number;
+  readonly maxBackoffMs: number;
+  readonly cooldownSeconds: number;
 }
 
 const isNormalizedFailure = (value: unknown): value is NormalizedGeminiFailure => {
@@ -72,13 +86,21 @@ export const runPreparedGeminiRoute = async (
 ): Promise<GeminiRouteOutcome> => {
   const deadline = input.deadlineStartedAt + input.deadlineSeconds * 1000;
   const seen = new Set<string>();
-  const attempts: StartedGeminiAttempt[] = [];
-  let attemptsUsed = 0;
-
-  for (const model of input.candidates) {
-    if (seen.has(model)) continue;
+  const attempts: StartedProviderAttempt[] = [];
+  const exhaustedCandidates = new Set<string>();
+  const candidates = input.candidates.filter(model => {
+    if (seen.has(model)) return false;
     seen.add(model);
-    if (!input.pinned && runtime.isCandidateEligible?.(model) === false) continue;
+    return true;
+  });
+  let attemptsUsed = 0;
+  let transientIndex = 0;
+
+  for (const [candidateIndex, model] of candidates.entries()) {
+    if (!input.pinned && runtime.cooldowns.isCooling('gemini', model, runtime.now())) {
+      exhaustedCandidates.add(model);
+      continue;
+    }
     if (attemptsUsed >= input.maxAttempts) break;
     if (runtime.now() >= deadline) {
       return { kind: 'terminal', reason: 'deadline-terminated', attemptsUsed, attempts };
@@ -104,6 +126,12 @@ export const runPreparedGeminiRoute = async (
       if (decision.kind === 'fail-fast' && decision.terminalReason === 'envelope-unusable') {
         return { kind: 'terminal', reason: 'envelope-unusable', attemptsUsed, attempts };
       }
+      if (decision.kind === 'fallback-eligible') {
+        exhaustedCandidates.add(model);
+        runtime.cooldowns.recordTransientFailure(
+          'gemini', model, runtime.now(), input.cooldownSeconds * 1000
+        );
+      }
       if (runtime.now() >= deadline) {
         return { kind: 'terminal', reason: 'deadline-terminated', attemptsUsed, attempts };
       }
@@ -111,6 +139,79 @@ export const runPreparedGeminiRoute = async (
         return { kind: 'fail-fast', failure: caught.failure };
       }
       if (input.pinned) break;
+      if (attemptsUsed >= input.maxAttempts) break;
+
+      const currentTransientIndex = transientIndex;
+      transientIndex += 1;
+      const hasLaterEligibleCandidate = candidates.slice(candidateIndex + 1).some(candidate =>
+        !runtime.cooldowns.isCooling('gemini', candidate, runtime.now())
+      );
+      if (!hasLaterEligibleCandidate) continue;
+
+      const retryAfterMs = Number.isSafeInteger(caught.failure.retryAfterMs)
+        && (caught.failure.retryAfterMs ?? -1) >= 0
+        ? caught.failure.retryAfterMs
+        : undefined;
+      const normalDelayMs = Math.min(
+        input.maxBackoffMs,
+        input.baseBackoffMs * 2 ** currentTransientIndex
+      );
+      const selectedDelayMs = Math.min(
+        input.maxBackoffMs,
+        retryAfterMs ?? normalDelayMs
+      );
+      const beforeSleep = runtime.now();
+      if (beforeSleep >= deadline || selectedDelayMs >= deadline - beforeSleep) {
+        return { kind: 'terminal', reason: 'deadline-terminated', attemptsUsed, attempts };
+      }
+      await runtime.sleep(selectedDelayMs);
+    }
+  }
+
+  const backup = runtime.backup;
+  const backupEligible = !input.pinned
+    && backup !== undefined
+    && candidates.length > 0
+    && exhaustedCandidates.size === candidates.length;
+  if (backupEligible && backup !== undefined) {
+    if (runtime.cooldowns.isCooling(backup.provider, backup.model, runtime.now())) {
+      return { kind: 'terminal', reason: 'route-exhausted', attemptsUsed, attempts };
+    }
+    if (attemptsUsed >= input.maxAttempts) {
+      return { kind: 'terminal', reason: 'route-exhausted', attemptsUsed, attempts };
+    }
+    if (runtime.now() >= deadline) {
+      return { kind: 'terminal', reason: 'deadline-terminated', attemptsUsed, attempts };
+    }
+    attemptsUsed += 1;
+    try {
+      return { kind: 'success', result: await backup.invoke() };
+    } catch (caught) {
+      const failure = isProviderFailure(caught)
+        ? caught
+        : createProviderFailure({
+            provider: 'openai-compatible',
+            category: 'unknown',
+            safeMessage: 'OpenAI-compatible request failed.',
+            cause: caught
+          });
+      attempts.push({
+        provider: backup.provider,
+        model: backup.model,
+        attempt: attemptsUsed,
+        category: failure.category
+      });
+      if (['rate-limit', 'timeout', 'temporary-service', 'network'].includes(failure.category)) {
+        runtime.cooldowns.recordTransientFailure(
+          backup.provider, backup.model, runtime.now(), input.cooldownSeconds * 1000
+        );
+      }
+      return {
+        kind: 'terminal',
+        reason: runtime.now() >= deadline ? 'deadline-terminated' : 'backup-exhausted',
+        attemptsUsed,
+        attempts
+      };
     }
   }
 
@@ -120,6 +221,7 @@ export const runPreparedGeminiRoute = async (
 export const GEMINI_TERMINAL_MAX_BYTES = 4096;
 export const GEMINI_TERMINAL_TRUNCATION_MARKER = '[...]';
 const MODEL_FIELD_MAX_BYTES = 320;
+const PROVIDER_FIELD_MAX_BYTES = 256;
 
 const escapedUnits = (value: string): string[] => [...value].map(character => {
   const codePoint = character.codePointAt(0)!;
@@ -133,10 +235,10 @@ const escapedUnits = (value: string): string[] => [...value].map(character => {
   return character;
 });
 
-const boundedEscapedModel = (model: string): string => {
-  const units = escapedUnits(model);
-  if (Buffer.byteLength(units.join(''), 'utf8') <= MODEL_FIELD_MAX_BYTES) return units.join('');
-  const budget = MODEL_FIELD_MAX_BYTES - Buffer.byteLength(GEMINI_TERMINAL_TRUNCATION_MARKER);
+const boundedEscapedField = (value: string, maximumBytes: number): string => {
+  const units = escapedUnits(value);
+  if (Buffer.byteLength(units.join(''), 'utf8') <= maximumBytes) return units.join('');
+  const budget = maximumBytes - Buffer.byteLength(GEMINI_TERMINAL_TRUNCATION_MARKER);
   let bytes = 0;
   let output = '';
   for (const unit of units) {
@@ -150,10 +252,10 @@ const boundedEscapedModel = (model: string): string => {
 
 export const formatGeminiTerminalMessage = (
   reason: GeminiTerminalReason,
-  attempts: readonly StartedGeminiAttempt[]
+  attempts: readonly StartedProviderAttempt[]
 ): string => {
   const records = attempts.map(attempt =>
-    `{provider=gemini,model="${boundedEscapedModel(attempt.model)}",attempt=${attempt.attempt},category=${attempt.category}}`
+    `{provider="${boundedEscapedField(attempt.provider, PROVIDER_FIELD_MAX_BYTES)}",model="${boundedEscapedField(attempt.model, MODEL_FIELD_MAX_BYTES)}",attempt=${attempt.attempt},category=${attempt.category}}`
   );
   const output = `Gemini recovery terminated: reason=${reason}; attempts=[${records.join(',')}]`;
   if (Buffer.byteLength(output, 'utf8') > GEMINI_TERMINAL_MAX_BYTES) {
