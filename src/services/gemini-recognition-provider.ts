@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: checkpoint-4-gemini-adapter
- * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-03
- * agent_notes: "Single-attempt Gemini adapter; live tool/server injection remains deferred."
- * insights: "Only owned timeout identity and mapped finite numeric status affect classification."
+ * phase: change-b-group-1-pin-contract
+ * sprint: gemini-model-recovery
+ * last_modified: 2026-08-07
+ * agent_notes: "Still single-attempt; request-local model pins now share startup identifier validation before filepath or service access."
+ * insights: "Pin validation and allowlist checks are pre-I/O. Later-group behavior remains deferred."
  */
 
 import path from 'node:path';
@@ -13,7 +13,10 @@ import {
   GeminiService,
   GeminiVideoProcessingTimeoutError
 } from './gemini.js';
-import type { GeminiProviderConfig } from './provider-config.js';
+import {
+  isValidProviderIdentifier,
+  type GeminiProviderConfig
+} from './provider-config.js';
 import { createProviderFailure } from './provider-failure.js';
 
 const supportedExtensions = {
@@ -94,6 +97,13 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
     }
 
     const model = request.model ?? this.config.model;
+    if (!isValidProviderIdentifier(model, 200)) {
+      throw createProviderFailure({
+        provider: 'gemini',
+        category: 'invalid-request',
+        safeMessage: 'Requested model is invalid.'
+      });
+    }
     if (this.config.modelAllowlist !== undefined && !this.config.modelAllowlist.includes(model)) {
       throw createProviderFailure({
         provider: 'gemini',

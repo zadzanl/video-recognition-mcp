@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: task-2.7-evidence-closure
- * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-04
- * agent_notes: "Credential-free selected-only configuration matrix with temporary canonical roots; task 2.7 added Gemini allowlist grammar and empty-list startup failure assertions."
- * insights: "The loader canonicalizes configured roots only and never starts providers or accesses requested media. GEMINI_MODEL_ALLOWLIST and OPENAI_COMPATIBLE_MODEL_ALLOWLIST share the comma-list grammar (trim, drop empties, exact case, first-occurrence dedupe, present-but-empty startup failure)."
+ * phase: change-b-group-1-configuration
+ * sprint: gemini-model-fallback-and-rate-limit-recovery
+ * last_modified: 2026-08-07
+ * agent_notes: "Compatibility matrix updated for the nested Gemini recovery defaults and deliberate GEMINI_MODELS unlock."
+ * insights: "The loader still validates only selected configuration; detailed Change B recovery coverage lives in gemini-recovery-config.test.ts."
  */
 
 import assert from 'node:assert/strict';
@@ -59,7 +59,16 @@ test('omitted selection defaults to exact Gemini config and ignores all OpenAI v
   assert.deepEqual(config, {
     provider: 'gemini',
     apiKey: 'google-secret',
-    model: DEFAULT_GEMINI_MODEL
+    model: DEFAULT_GEMINI_MODEL,
+    recovery: {
+      modelRoute: [DEFAULT_GEMINI_MODEL],
+      maxAttempts: 4,
+      deadlineSeconds: 30,
+      baseBackoffMs: 250,
+      maxBackoffMs: 2000,
+      cooldownSeconds: 60,
+      backup: { enabled: false }
+    }
   });
 });
 
@@ -74,14 +83,25 @@ test('Gemini validates only its selected values, aliases, identifiers, and allow
     provider: 'gemini',
     apiKey: 'key',
     model: 'model-A',
-    modelAllowlist: ['model-A', 'model-B']
+    modelAllowlist: ['model-A', 'model-B'],
+    recovery: {
+      modelRoute: ['model-A'],
+      maxAttempts: 4,
+      deadlineSeconds: 30,
+      baseBackoffMs: 250,
+      maxBackoffMs: 2000,
+      cooldownSeconds: 60,
+      backup: { enabled: false }
+    }
   });
 
-  for (const value of ['', 'anything']) {
-    const message = await rejectionMessage({ GOOGLE_API_KEY: 'key', GEMINI_MODELS: value });
-    assert.match(message, /GEMINI_MODELS/u);
-    assert.equal(message.includes(value || 'anything-never'), false);
-  }
+  const routed = await loadRecognitionProviderConfig({
+    GOOGLE_API_KEY: 'key',
+    GEMINI_MODELS: ' model-A, model-B '
+  });
+  assert.equal(routed.provider, 'gemini');
+  if (routed.provider !== 'gemini') assert.fail('wrong provider branch');
+  assert.deepEqual(routed.recovery.modelRoute, ['model-A', 'model-B']);
   await assert.rejects(
     loadRecognitionProviderConfig({ GOOGLE_API_KEY: 'key', GEMINI_MODEL_ALLOWLIST: ' , \t, ' }),
     /GEMINI_MODEL_ALLOWLIST/u

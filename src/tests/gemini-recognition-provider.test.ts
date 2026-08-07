@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: task-2.7-evidence-closure
- * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-04
- * agent_notes: "Credential-free direct matrix for strict Gemini adapter flow and structural failures; task 2.7 added no-echo rejection assertions."
- * insights: "Numeric statuses are synthetic contract fixtures; installed SDK message-only errors remain unknown. Allowlist rejection safeMessage never echoes requested/default/allowed models or credentials."
+ * phase: change-b-group-1-pin-contract
+ * sprint: gemini-model-fallback-and-rate-limit-recovery
+ * last_modified: 2026-08-07
+ * agent_notes: "Direct adapter matrix now covers validated one-attempt pins and route immutability without adding routing behavior."
+ * insights: "Invalid, non-string, and disallowed pins fail before filepath/service access; cooling and pin-driven cooldown effects remain Groups 3-4 work."
  */
 
 import assert from 'node:assert/strict';
@@ -41,6 +41,15 @@ const config = (overrides: Partial<GeminiProviderConfig> = {}): GeminiProviderCo
   provider: 'gemini',
   apiKey: 'credential-free-test-key',
   model: 'configured-model',
+  recovery: {
+    modelRoute: ['configured-model'],
+    maxAttempts: 4,
+    deadlineSeconds: 30,
+    baseBackoffMs: 250,
+    maxBackoffMs: 2000,
+    cooldownSeconds: 60,
+    backup: { enabled: false }
+  },
   ...overrides
 });
 
@@ -154,6 +163,79 @@ test('allowlist uses exact equality and rejects before filepath or service work'
   assert.equal(failure.category, 'invalid-request');
   assert.equal(failure.safeMessage, 'Requested model is not allowed.');
   assert.equal(rejected.calls.uploadedPaths.length, 0);
+});
+
+test('primary, later-route, and allowed off-route pins each make one call without route mutation', async () => {
+  const route = ['primary-model', 'later-model'] as const;
+  const configured = config({
+    model: route[0],
+    modelAllowlist: [...route, 'off-route-model'],
+    recovery: {
+      modelRoute: route,
+      maxAttempts: 4,
+      deadlineSeconds: 30,
+      baseBackoffMs: 250,
+      maxBackoffMs: 2000,
+      cooldownSeconds: 60,
+      backup: { enabled: false }
+    }
+  });
+  const routeBefore = [...configured.recovery.modelRoute];
+
+  for (const pin of ['primary-model', 'later-model', 'off-route-model']) {
+    const { service, calls } = fakeService();
+    const provider = new GeminiRecognitionProvider(service, configured);
+    await provider.recognize(request({ model: pin }));
+    assert.deepEqual(calls.uploadedPaths, ['fixture.png']);
+    assert.equal(calls.generations.length, 1);
+    assert.equal(calls.generations[0]?.model, pin);
+    assert.deepEqual(configured.recovery.modelRoute, routeBefore);
+  }
+});
+
+test('invalid pins fail before filepath, upload, or generation access', async () => {
+  for (const model of [
+    '', '😀'.repeat(201), `bad\u0000model`, `bad\u0085model`,
+    `bad\u200Emodel`, `bad\u202Emodel`, `bad\u2066model`, `bad\u2028model`
+  ]) {
+    const { service, calls } = fakeService();
+    const provider = new GeminiRecognitionProvider(service, config());
+    const hostileRequest = {
+      model,
+      get filepath(): string { return unexpectedAccess('filepath'); },
+      get prompt(): string { return unexpectedAccess('prompt'); },
+      get mediaKind(): 'image' { return unexpectedAccess('mediaKind'); }
+    } as RecognitionRequest;
+    const failure = await captureFailure(provider, hostileRequest);
+    assert.equal(failure.category, 'invalid-request');
+    assert.equal(failure.safeMessage, 'Requested model is invalid.');
+    if (model.length > 0) assert.equal(failure.safeMessage.includes(model), false);
+    assert.equal(calls.uploadedPaths.length, 0);
+    assert.equal(calls.generations.length, 0);
+  }
+});
+
+test('runtime non-string pin fails as invalid-request before filepath or service access', async () => {
+  const { service, calls } = fakeService();
+  const provider = new GeminiRecognitionProvider(service, config());
+  const hostileRequest = {
+    model: { length: 5 },
+    get filepath(): string { return unexpectedAccess('filepath'); },
+    get prompt(): string { return unexpectedAccess('prompt'); },
+    get mediaKind(): 'image' { return unexpectedAccess('mediaKind'); }
+  } as unknown as RecognitionRequest;
+
+  const failure = await captureFailure(provider, hostileRequest);
+  assert.equal(failure.category, 'invalid-request');
+  assert.equal(failure.safeMessage, 'Requested model is invalid.');
+  assert.equal(calls.uploadedPaths.length, 0);
+  assert.equal(calls.generations.length, 0);
+});
+
+test('cooling-pin bypass and pin cooldown mutation remain deferred until Groups 3-4', () => {
+  // No cooldown store exists in Group 1. The executable contract here is validation,
+  // exact one-call pinning, pre-I/O rejection, and route immutability only.
+  assert.equal('cooldownStore' in config().recovery, false);
 });
 
 test('allowlist rejection safe message never echoes requested, default, allowed models, or credentials', async () => {
