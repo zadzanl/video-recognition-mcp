@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: change-b-group-1-pin-contract
+ * phase: change-b-group-3-ordered-fallback
  * sprint: gemini-model-fallback-and-rate-limit-recovery
  * last_modified: 2026-08-07
- * agent_notes: "Direct adapter matrix now covers validated one-attempt pins and route immutability without adding routing behavior."
- * insights: "Invalid, non-string, and disallowed pins fail before filepath/service access; cooling and pin-driven cooldown effects remain Groups 3-4 work."
+ * agent_notes: "Adapter integration covers one preparation, ordered models, one-element pins, and fresh post-preparation deadlines."
+ * insights: "Invalid/disallowed pins remain pre-I/O and route-immutable. Raw extraction is classifier-only. Production Gemini generation intentionally has no adapter-wide timeout; the router uses only a soft pre-start clock gate."
  */
 
 import assert from 'node:assert/strict';
@@ -35,6 +35,8 @@ interface FakeOptions {
   uploadError?: unknown;
   generationError?: unknown;
   text?: string;
+  onUpload?: () => void;
+  generate?: (model: string) => Promise<GeminiResponse> | GeminiResponse;
 }
 
 const config = (overrides: Partial<GeminiProviderConfig> = {}): GeminiProviderConfig => ({
@@ -70,6 +72,7 @@ const fakeService = (options: FakeOptions = {}): { service: GeminiService; calls
   const service = {
     uploadFile: async (filepath: string): Promise<GeminiFile> => {
       calls.uploadedPaths.push(filepath);
+      options.onUpload?.();
       if (options.uploadError !== undefined) throw options.uploadError;
       return file;
     },
@@ -79,6 +82,7 @@ const fakeService = (options: FakeOptions = {}): { service: GeminiService; calls
       model: string
     ): Promise<GeminiResponse> => {
       calls.generations.push({ file: uploadedFile, prompt, model });
+      if (options.generate !== undefined) return options.generate(model);
       if (options.generationError !== undefined) throw options.generationError;
       return { text: options.text ?? 'recognized text' };
     },
@@ -88,6 +92,14 @@ const fakeService = (options: FakeOptions = {}): { service: GeminiService; calls
     }
   } as unknown as GeminiService;
   return { service, calls };
+};
+
+const sdkError = (status: number, providerCode: string): Error => {
+  const error = new Error(`got status: ${status} Status Text. ${JSON.stringify({
+    error: { code: status, status: providerCode }
+  })}`);
+  error.name = status < 500 ? 'ClientError' : 'ServerError';
+  return error;
 };
 
 const captureFailure = async (
@@ -311,35 +323,104 @@ test('upload and generation failures terminate after one attempt', async () => {
   assert.equal(generation.calls.generations.length, 1);
 });
 
-test('synthetic contract fixtures map only approved finite numeric statuses', async () => {
+test('exact permanent SDK envelopes fail fast with approved structured statuses', async () => {
   const mapped = [
     [400, 'invalid-request'], [401, 'authentication'], [402, 'billing'],
-    [403, 'permission'], [429, 'rate-limit'], [500, 'temporary-service'],
-    [503, 'temporary-service']
+    [403, 'permission']
   ] as const;
   for (const [status, category] of mapped) {
-    const { service } = fakeService({ generationError: { status } });
+    const { service } = fakeService({ generationError: sdkError(status, 'PERMANENT') });
     const failure = await captureFailure(new GeminiRecognitionProvider(service, config()), request());
     assert.equal(failure.category, category);
     assert.equal(failure.status, status);
   }
-
-  const inherited = Object.create({ status: 429 }) as object;
-  const inheritedService = fakeService({ generationError: inherited }).service;
-  const inheritedFailure = await captureFailure(
-    new GeminiRecognitionProvider(inheritedService, config()),
-    request()
-  );
-  assert.equal(inheritedFailure.category, 'rate-limit');
-  assert.equal(inheritedFailure.status, 429);
 });
 
-test('synthetic invalid and unmapped statuses remain unknown without status', async () => {
+test('one preparation supports ordered transient fallback and stops on exact success', async () => {
+  const configured = config({
+    model: 'primary',
+    recovery: {
+      modelRoute: ['primary', 'secondary', 'third'], maxAttempts: 3,
+      deadlineSeconds: 30, baseBackoffMs: 250, maxBackoffMs: 2000,
+      cooldownSeconds: 60, backup: { enabled: false }
+    }
+  });
+  const { service, calls } = fakeService({
+    generate: model => {
+      if (model === 'primary') throw sdkError(503, 'UNAVAILABLE');
+      return { text: 'secondary exact text' };
+    }
+  });
+  const result = await new GeminiRecognitionProvider(service, configured).recognize(request());
+  assert.deepEqual(result, { text: 'secondary exact text' });
+  assert.deepEqual(calls.uploadedPaths, ['fixture.png']);
+  assert.deepEqual(calls.generations.map(call => call.model), ['primary', 'secondary']);
+  assert.equal(calls.wrapperCalls, 0);
+});
+
+test('all transient route failures produce bounded typed terminal content', async () => {
+  const configured = config({
+    model: 'primary',
+    recovery: {
+      modelRoute: ['primary', 'secondary'], maxAttempts: 2,
+      deadlineSeconds: 30, baseBackoffMs: 250, maxBackoffMs: 2000,
+      cooldownSeconds: 60, backup: { enabled: false }
+    }
+  });
+  const { service, calls } = fakeService({ generationError: sdkError(429, 'RESOURCE_EXHAUSTED') });
+  const failure = await captureFailure(new GeminiRecognitionProvider(service, configured), request());
+  assert.equal(failure.category, 'temporary-service');
+  assert.match(failure.safeMessage, /reason=route-exhausted/u);
+  assert.match(failure.safeMessage, /model="primary".*attempt=1.*model="secondary".*attempt=2/u);
+  assert.equal(Buffer.byteLength(failure.safeMessage, 'utf8') <= 4096, true);
+  assert.equal(failure.safeMessage.includes('RESOURCE_EXHAUSTED'), false);
+  assert.deepEqual(calls.uploadedPaths, ['fixture.png']);
+  assert.deepEqual(calls.generations.map(call => call.model), ['primary', 'secondary']);
+});
+
+test('long preparation receives a fresh deadline and preparation failure starts no generation', async () => {
+  let nowMs = 0;
+  const prepared = fakeService({ onUpload: () => { nowMs += 45_000; } });
+  const result = await new GeminiRecognitionProvider(prepared.service, config(), {
+    now: () => nowMs
+  }).recognize(request());
+  assert.deepEqual(result, { text: 'recognized text' });
+  assert.equal(prepared.calls.generations.length, 1);
+
+  const failed = fakeService({ uploadError: new Error('preparation secret') });
+  const failure = await captureFailure(new GeminiRecognitionProvider(failed.service, config(), {
+    now: () => { throw new Error('deadline must not start'); }
+  }), request());
+  assert.equal(failure.category, 'unknown');
+  assert.equal(failed.calls.generations.length, 0);
+});
+
+test('pinned transient call bypasses eligibility and never falls through to route', async () => {
+  const configured = config({
+    model: 'primary', modelAllowlist: ['primary', 'later', 'off-route'],
+    recovery: {
+      modelRoute: ['primary', 'later'], maxAttempts: 4,
+      deadlineSeconds: 30, baseBackoffMs: 250, maxBackoffMs: 2000,
+      cooldownSeconds: 60, backup: { enabled: false }
+    }
+  });
+  const { service, calls } = fakeService({ generationError: sdkError(503, 'UNAVAILABLE') });
+  let eligibilityChecks = 0;
+  const failure = await captureFailure(new GeminiRecognitionProvider(service, configured, {
+    now: () => 0,
+    isCandidateEligible: () => { eligibilityChecks += 1; return false; }
+  }), request({ model: 'later' }));
+  assert.match(failure.safeMessage, /reason=route-exhausted/u);
+  assert.deepEqual(calls.generations.map(call => call.model), ['later']);
+  assert.equal(eligibilityChecks, 0);
+});
+
+test('synthetic raw status properties and malformed envelopes are never trusted', async () => {
   const throwingStatus = Object.create(null) as Record<string, unknown>;
   Object.defineProperty(throwingStatus, 'status', { get: () => { throw new Error('getter secret'); } });
   for (const cause of [
-    { status: '429' }, { status: Number.NaN }, { status: Infinity },
-    { status: -Infinity }, { status: 404 }, throwingStatus
+    { status: 429 }, Object.create({ status: 429 }), { status: '429' },
+    { status: Number.NaN }, { status: Infinity }, throwingStatus
   ]) {
     const { service } = fakeService({ generationError: cause });
     const failure = await captureFailure(new GeminiRecognitionProvider(service, config()), request());
@@ -348,7 +429,7 @@ test('synthetic invalid and unmapped statuses remain unknown without status', as
   }
 });
 
-test('message, name, tokens, retryability, and upstream code never alter classification', async () => {
+test('preparation message, name, tokens, retryability, and upstream code never alter classification', async () => {
   const variants = [
     new Error('got status: 429 rate limit token exhausted'),
     Object.assign(new Error('server unavailable'), {
@@ -385,10 +466,8 @@ test('owned timeout identity alone maps to GEMINI_VIDEO_PROCESSING_TIMEOUT', asy
 });
 
 test('retained cause is non-enumerable and public failure text is sanitized', async () => {
-  const cause = Object.assign(new Error('upstream content secret'), {
-    status: 429,
-    code: 'UPSTREAM_CODE_SECRET'
-  });
+  const cause = sdkError(403, 'PERMISSION_DENIED');
+  Object.assign(cause, { upstreamCode: 'UPSTREAM_CODE_SECRET' });
   const filepath = 'C:/private/media/secret.png';
   const prompt = 'private prompt secret';
   const model = 'private model secret';
@@ -401,7 +480,7 @@ test('retained cause is non-enumerable and public failure text is sanitized', as
   assert.equal(failure.cause, cause);
   assert.equal(Object.getOwnPropertyDescriptor(failure, 'cause')?.enumerable, false);
   const publicText = `${failure.safeMessage}${JSON.stringify(failure)}${JSON.stringify({ ...failure })}`;
-  for (const secret of [filepath, prompt, model, cause.message, cause.code]) {
+  for (const secret of [filepath, prompt, model, cause.message, 'UPSTREAM_CODE_SECRET']) {
     assert.equal(publicText.includes(secret), false);
   }
   assert.equal(failure.safeMessage.includes('429'), false);
@@ -416,15 +495,30 @@ test('valid Gemini config composes directly through the pinned constructor', asy
   assert.deepEqual(await provider.recognize(request()), { text: 'composed result' });
 });
 
-test('adapter source contains no forbidden future-sprint behavior or wrapper call', async () => {
-  const source = await readFile(
+test('source boundaries isolate raw SDK extraction and exclude future-group behavior', async () => {
+  const adapterSource = await readFile(
     path.resolve(process.cwd(), 'src/services/gemini-recognition-provider.ts'),
     'utf8'
   );
-  assert.match(source, /\.processFileOrThrow\(/u);
-  assert.doesNotMatch(source, /\.processFile\(/u);
-  assert.doesNotMatch(source, /\bfetch\s*\(|OpenAI|allowedMediaRoots|realpath|readFile/u);
-  assert.doesNotMatch(source, /retry|fallback|cooldown|routing|parallel|throttl/iu);
-  assert.doesNotMatch(source, /\.message|\.name|\.code|retryable|tokens|ApiError|ClientError|ServerError/u);
-  assert.doesNotMatch(source, /setTimeout|AbortController|AbortSignal\.any/u);
+  const classifierSource = await readFile(
+    path.resolve(process.cwd(), 'src/services/gemini-error-classifier.ts'),
+    'utf8'
+  );
+  const routerSource = await readFile(
+    path.resolve(process.cwd(), 'src/services/gemini-recovery-router.ts'),
+    'utf8'
+  );
+  assert.match(adapterSource, /\.processFileOrThrow\(/u);
+  assert.doesNotMatch(adapterSource, /\.processFile\(/u);
+  assert.doesNotMatch(adapterSource, /\bfetch\s*\(|OpenAI|allowedMediaRoots|realpath|readFile/u);
+  assert.doesNotMatch(adapterSource, /\.message|\.name|\.code|ClientError|ServerError|got status:/u);
+  assert.match(classifierSource, /\.message/u);
+  assert.match(classifierSource, /\.name/u);
+  assert.match(classifierSource, /ClientError|ServerError/u);
+  assert.match(classifierSource, /got status:/u);
+  assert.doesNotMatch(routerSource, /\.(?:message|name|code)\b|ClientError|ServerError|got status:/u);
+  for (const source of [adapterSource, classifierSource, routerSource]) {
+    assert.doesNotMatch(source, /cooldown(?:Map|Store)|\bbackoff\s*[:=(]|\b(?:sleep|random)\s*[:=(]|jitter\s*[:=(]|Math\.random|backup-exhausted|operator.?log|AbortSignal\.any/iu);
+  }
+  assert.doesNotMatch(routerSource, /setTimeout|AbortController|Promise\.race/u);
 });
