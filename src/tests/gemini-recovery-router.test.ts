@@ -21,6 +21,7 @@ import { createProviderFailure } from '../services/provider-failure.js';
 import type { NormalizedGeminiFailure } from '../services/gemini-error-classifier.js';
 import type { ProviderFailureCategory, RecognitionResult } from '../types/provider.js';
 import { createProviderModelCooldownStore } from '../services/provider-cooldown-store.js';
+import type { RecoveryDiagnosticEvent } from '../services/recovery-diagnostics.js';
 
 class FakeClock {
   nowMs = 0;
@@ -48,6 +49,7 @@ const unusable = (): NormalizedGeminiFailure => ({
   failure: createProviderFailure({ provider: 'gemini', category: 'malformed-response', safeMessage: 'fixed' })
 });
 const input = (overrides: Partial<GeminiRouteInput> = {}): GeminiRouteInput => ({
+  mediaKind: 'image',
   candidates: ['primary', 'secondary', 'third'], pinned: false,
   maxAttempts: 4, deadlineSeconds: 30, deadlineStartedAt: 0,
   baseBackoffMs: 250, maxBackoffMs: 2000, cooldownSeconds: 60, ...overrides
@@ -226,6 +228,61 @@ test('cooldown skips consume no attempts, create no gaps, and never poll', async
   assert.deepEqual(allFalse, { kind: 'terminal', reason: 'route-exhausted', attemptsUsed: 0, attempts: [] });
 });
 
+test('diagnostic events follow execution order with contiguous started attempts and no skip number', async () => {
+  const cooldowns = createProviderModelCooldownStore();
+  cooldowns.recordTransientFailure('gemini', 'primary', 0, 1000);
+  const events: RecoveryDiagnosticEvent[] = [];
+  const outcome = await runPreparedGeminiRoute(input(), runtime({
+    cooldowns,
+    diagnosticSink: event => events.push(event),
+    invokePreparedModel: async model => {
+      if (model === 'secondary') throw {
+        envelopeState: 'not-applicable',
+        failure: createProviderFailure({
+          provider: 'gemini', category: 'temporary-service', code: 'UNAVAILABLE',
+          safeMessage: 'api_key=HOSTILE_SAFE_MESSAGE_SENTINEL prompt=PRIVATE_PROMPT'
+        })
+      } satisfies NormalizedGeminiFailure;
+      return { text: 'exact success' };
+    }
+  }));
+  assert.deepEqual(outcome, { kind: 'success', result: { text: 'exact success' } });
+  assert.deepEqual(events.map(event => event.kind), [
+    'cooldown-skipped', 'attempt-started', 'attempt-classified',
+    'attempt-started', 'fallback-succeeded'
+  ]);
+  assert.equal('attempt' in events[0]!, false);
+  assert.deepEqual(
+    events.filter(event => event.kind === 'attempt-started').map(event => event.attempt),
+    [1, 2]
+  );
+  const classified = events.find(event => event.kind === 'attempt-classified');
+  assert.equal(classified?.kind, 'attempt-classified');
+  if (classified?.kind === 'attempt-classified') {
+    assert.equal(classified.operatorMessage.includes('HOSTILE_SAFE_MESSAGE_SENTINEL'), false);
+    assert.equal(classified.operatorMessage.includes('PRIVATE_PROMPT'), false);
+    assert.equal(classified.operatorMessage.includes('<redacted>'), true);
+  }
+});
+
+test('terminal routes emit exactly one exhaustion event and throwing sinks do not alter routing', async () => {
+  const events: RecoveryDiagnosticEvent[] = [];
+  const exhausted = await runPreparedGeminiRoute(input({ candidates: ['only'] }), runtime({
+    diagnosticSink: event => events.push(event),
+    invokePreparedModel: async () => { throw transient(); }
+  }));
+  assert.equal(exhausted.kind, 'terminal');
+  assert.equal(events.filter(event => event.kind === 'route-exhausted').length, 1);
+
+  let calls = 0;
+  const success = await runPreparedGeminiRoute(input({ candidates: ['only'] }), runtime({
+    diagnosticSink: () => { throw new Error('observer failure'); },
+    invokePreparedModel: async () => { calls += 1; return { text: 'unchanged' }; }
+  }));
+  assert.deepEqual(success, { kind: 'success', result: { text: 'unchanged' } });
+  assert.equal(calls, 1);
+});
+
 test('pins bypass eligibility, use one model, preserve route, and never fallback', async () => {
   for (const pin of ['primary', 'secondary', 'off-route', 'cooling']) {
     const route = ['primary', 'secondary'];
@@ -244,19 +301,16 @@ test('pins bypass eligibility, use one model, preserve route, and never fallback
   }
 });
 
-test('terminal formatter escapes controls/bidi, is deterministic, bounded, and uses only closed tuples', () => {
-  const escaped = formatGeminiTerminalMessage('envelope-unusable', [{
+test('terminal formatter rejects hostile identifiers and bounds valid closed tuples', () => {
+  const rejected = formatGeminiTerminalMessage('envelope-unusable', [{
     provider: 'gemini', model: `a\u0000\u0085\u061C\u200E\u202E\u2066b`, attempt: 1,
     category: 'malformed-response'
   }]);
-  for (const unit of ['\\u0000', '\\u0085', '\\u061C', '\\u200E', '\\u202E', '\\u2066']) {
-    assert.equal(escaped.includes(unit), true);
-  }
-  assert.doesNotMatch(escaped, /[\u0000\u0085\u061C\u200E\u202E\u2066]/u);
+  assert.equal(rejected, 'Recognition recovery failed: diagnostic unavailable.');
 
   const attempts: StartedGeminiAttempt[] = Array.from({ length: 8 }, (_, index) => ({
     provider: 'gemini',
-    model: `${'😀'.repeat(200)}"\\\u0085\u061C\u202E\u2066-secret-${index}`,
+    model: `${'😀'.repeat(190)}"\\-model-${index}`,
     attempt: index + 1,
     category: (['rate-limit', 'timeout', 'temporary-service', 'malformed-response'] as const)[index % 4]!
   }));
@@ -264,7 +318,7 @@ test('terminal formatter escapes controls/bidi, is deterministic, bounded, and u
   assert.equal(output, formatGeminiTerminalMessage('route-exhausted', attempts));
   assert.equal(Buffer.byteLength(output, 'utf8') <= GEMINI_TERMINAL_MAX_BYTES, true);
   assert.match(output, /reason=route-exhausted/u);
-  assert.match(output, /\\u0085|\[\.\.\.\]/u);
+  assert.match(output, /\\"|\\\\|\[\.\.\.\]/u);
   assert.equal(output.includes(GEMINI_TERMINAL_TRUNCATION_MARKER), true);
   assert.equal(output.includes('backup-exhausted'), false);
   assert.equal(output.includes('safeMessage'), false);
@@ -555,11 +609,11 @@ test('only approved transient backup categories cool later requests and expiry p
 test('backup exhaustion formatting includes ordered provider/model/category tuples within cap', () => {
   const attempts: StartedGeminiAttempt[] = [
     { provider: 'gemini', model: 'primary', attempt: 1, category: 'rate-limit' },
-    { provider: 'Backup\u202Eprovider', model: 'backup-model', attempt: 2, category: 'unsupported-media' }
+    { provider: 'Backup provider', model: 'backup-model', attempt: 2, category: 'unsupported-media' }
   ];
   const output = formatGeminiTerminalMessage('backup-exhausted', attempts);
   assert.match(output, /reason=backup-exhausted/u);
-  assert.match(output, /provider="gemini".*attempt=1.*provider="Backup\\u202Eprovider".*attempt=2/u);
+  assert.match(output, /provider=\\?"gemini\\?".*attempt=1.*provider=\\?"Backup provider\\?".*attempt=2/u);
   assert.match(output, /category=unsupported-media/u);
   assert.equal(Buffer.byteLength(output, 'utf8') <= GEMINI_TERMINAL_MAX_BYTES, true);
   assert.equal(output.includes('safeMessage'), false);

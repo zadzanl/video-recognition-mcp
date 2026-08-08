@@ -1,11 +1,11 @@
 /**
  * Entry point for the MCP video recognition server
  * status: active
- * phase: change-b-groups-4-5-recovery
+ * phase: change-b-group-6-observability
  * sprint: gemini-model-fallback-and-rate-limit-recovery
- * last_modified: 2026-08-07
- * agent_notes: "Startup constructs one top-level provider and one process-local cooldown store for Gemini recovery."
- * insights: "Enabled Gemini backup reuses the complete Change A OpenAI-compatible config and provider; disabled backup constructs neither."
+ * last_modified: 2026-08-08
+ * agent_notes: "Startup injects one bounded recovery diagnostic sink into the Gemini branch."
+ * insights: "Recovery events are preformatted to one bounded string; Logger receives no second data/error argument."
  */
 
 import { Server } from './server.js';
@@ -15,6 +15,7 @@ import { GeminiService } from './services/gemini.js';
 import { GeminiRecognitionProvider } from './services/gemini-recognition-provider.js';
 import { OpenAICompatibleRecognitionProvider } from './services/openai-compatible-recognition-provider.js';
 import { createProviderModelCooldownStore } from './services/provider-cooldown-store.js';
+import { formatRecoveryDiagnosticEvent } from './services/recovery-diagnostics.js';
 import type { RecognitionProvider } from './types/provider.js';
 import type { ServerConfig } from './server.js';
 
@@ -41,6 +42,11 @@ async function loadConfig(): Promise<ServerConfig> {
       : undefined;
     provider = new GeminiRecognitionProvider(service, providerConfig, {
       cooldowns,
+      diagnosticSink: event => {
+        const message = formatRecoveryDiagnosticEvent(event);
+        if (event.kind === 'attempt-started' || event.kind === 'fallback-succeeded') log.info(message);
+        else log.warn(message);
+      },
       ...(backupProvider === undefined ? {} : { backupProvider })
     });
   } else {

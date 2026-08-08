@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: change-b-groups-4-5-recovery
+ * phase: change-b-group-6-observability
  * sprint: gemini-model-recovery
- * last_modified: 2026-08-07
- * agent_notes: "Prepares media once, then delegates validated routes to the cooldown-aware recovery router."
- * insights: "One store is shared by each provider instance. Pin validation remains pre-I/O; pins bypass cooldown reads but transient pin failures update later unpinned calls."
+ * last_modified: 2026-08-08
+ * agent_notes: "Validates runtime media kind before I/O and separates recovery terminal diagnostics from operator safeMessage."
+ * insights: "One store is shared by each provider instance. Recovery terminal provenance is private WeakMap state owned by recovery-diagnostics."
  */
 
 import path from 'node:path';
@@ -23,10 +23,12 @@ import {
   createProviderModelCooldownStore,
   type ProviderModelCooldownStore
 } from './provider-cooldown-store.js';
+import { runPreparedGeminiRoute } from './gemini-recovery-router.js';
 import {
-  formatGeminiTerminalMessage,
-  runPreparedGeminiRoute
-} from './gemini-recovery-router.js';
+  createRecoveryTerminalFailure,
+  isMediaKind,
+  type RecoveryDiagnosticSink
+} from './recovery-diagnostics.js';
 import { canonicalizeContainedFile } from './openai-compatible-recognition-provider.js';
 
 const supportedExtensions = {
@@ -65,6 +67,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
       readonly sleep?: (ms: number) => Promise<void>;
       readonly cooldowns?: ProviderModelCooldownStore;
       readonly backupProvider?: RecognitionProvider;
+      readonly diagnosticSink?: RecoveryDiagnosticSink;
     } = {}
   ) {
     this.cooldowns = runtime.cooldowns ?? createProviderModelCooldownStore();
@@ -97,8 +100,17 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
       });
     }
 
+    if (!isMediaKind(request.mediaKind)) {
+      throw createProviderFailure({
+        provider: 'gemini',
+        category: 'invalid-request',
+        safeMessage: 'Requested media kind is invalid.'
+      });
+    }
+    const mediaKind = request.mediaKind;
+
     const extension = path.extname(request.filepath).toLowerCase();
-    if (!supportedExtensions[request.mediaKind].has(extension)) {
+    if (!supportedExtensions[mediaKind].has(extension)) {
       throw createProviderFailure({
         provider: 'gemini',
         category: 'unsupported-media',
@@ -125,6 +137,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
       await new Promise<void>(resolve => setTimeout(resolve, ms));
     });
     const outcome = await runPreparedGeminiRoute({
+      mediaKind,
       candidates: pin === undefined ? this.config.recovery.modelRoute : [requestedModel],
       pinned: pin !== undefined,
       maxAttempts: this.config.recovery.maxAttempts,
@@ -137,6 +150,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
       now,
       sleep,
       cooldowns: this.cooldowns,
+      diagnosticSink: this.runtime.diagnosticSink,
       ...(this.config.recovery.backup.enabled && this.runtime.backupProvider !== undefined
         ? {
             backup: {
@@ -145,7 +159,7 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
               invoke: () => this.runtime.backupProvider!.recognize({
                 filepath: canonicalFilepath,
                 prompt: request.prompt,
-                mediaKind: request.mediaKind
+                mediaKind
               }, options)
             }
           }
@@ -161,10 +175,12 @@ export class GeminiRecognitionProvider implements RecognitionProvider {
     });
     if (outcome.kind === 'success') return outcome.result;
     if (outcome.kind === 'fail-fast') throw outcome.failure;
-    throw createProviderFailure({
+    throw createRecoveryTerminalFailure({
       provider: 'gemini',
       category: outcome.reason === 'envelope-unusable' ? 'malformed-response' : 'temporary-service',
-      safeMessage: formatGeminiTerminalMessage(outcome.reason, outcome.attempts)
+      mediaKind,
+      reason: outcome.reason,
+      attempts: outcome.attempts
     });
   }
 }

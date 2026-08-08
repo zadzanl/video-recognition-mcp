@@ -1,38 +1,33 @@
 /**
  * status: active
- * phase: change-b-groups-4-5-recovery
+ * phase: change-b-group-6-observability
  * sprint: gemini-model-fallback-and-rate-limit-recovery
- * last_modified: 2026-08-07
- * agent_notes: "Request-local prepared-media router with deterministic backoff, bounded cooldown, and soft pre-start gates."
- * insights: "Clock, sleeper, cooldown state, and invoker are injected. Timing has no randomness: retryAfterMs replaces capped exponential delay when valid."
+ * last_modified: 2026-08-08
+ * agent_notes: "Request-local prepared-media router imports shared closed diagnostics; event wiring follows in Group 6 Phase 2."
+ * insights: "Clock, sleeper, cooldown state, and invoker are injected. Terminal escaping and UTF-8 bounding are now single-sourced in recovery-diagnostics."
  */
 
-import type {
-  ProviderFailure,
-  ProviderFailureCategory,
-  RecognitionResult
-} from '../types/provider.js';
+import type { ProviderFailure, RecognitionResult } from '../types/provider.js';
 import {
   classifyNormalizedGeminiFailure,
   type NormalizedGeminiFailure
 } from './gemini-error-classifier.js';
 import type { ProviderModelCooldownStore } from './provider-cooldown-store.js';
 import { createProviderFailure, isProviderFailure } from './provider-failure.js';
+import {
+  emitRecoveryDiagnostic,
+  formatRecoveryTerminalMessage,
+  RECOVERY_DIAGNOSTIC_MAX_BYTES,
+  RECOVERY_DIAGNOSTIC_TRUNCATION_MARKER,
+  sanitizeOperatorMessage,
+  type GeminiTerminalReason,
+  type RecoveryDiagnosticSink,
+  type StartedProviderAttempt
+} from './recovery-diagnostics.js';
+import type { MediaKind } from '../types/provider.js';
 
-export interface StartedProviderAttempt {
-  readonly provider: string;
-  readonly model: string;
-  readonly attempt: number;
-  readonly category: ProviderFailureCategory;
-}
-
+export type { GeminiTerminalReason, StartedProviderAttempt } from './recovery-diagnostics.js';
 export type StartedGeminiAttempt = StartedProviderAttempt;
-
-export type GeminiTerminalReason =
-  | 'route-exhausted'
-  | 'deadline-terminated'
-  | 'envelope-unusable'
-  | 'backup-exhausted';
 
 export type GeminiRouteOutcome =
   | { readonly kind: 'success'; readonly result: RecognitionResult }
@@ -49,6 +44,7 @@ export interface GeminiRouterRuntime {
   readonly sleep: (ms: number) => Promise<void>;
   readonly cooldowns: ProviderModelCooldownStore;
   readonly invokePreparedModel: (model: string) => Promise<RecognitionResult>;
+  readonly diagnosticSink?: RecoveryDiagnosticSink;
   readonly backup?: {
     readonly provider: string;
     readonly model: string;
@@ -57,6 +53,7 @@ export interface GeminiRouterRuntime {
 }
 
 export interface GeminiRouteInput {
+  readonly mediaKind: MediaKind;
   readonly candidates: readonly string[];
   readonly pinned: boolean;
   readonly maxAttempts: number;
@@ -95,20 +92,39 @@ export const runPreparedGeminiRoute = async (
   });
   let attemptsUsed = 0;
   let transientIndex = 0;
+  let recoveryTransition = false;
+  const emit = (event: Parameters<NonNullable<GeminiRouterRuntime['diagnosticSink']>>[0]): void =>
+    emitRecoveryDiagnostic(runtime.diagnosticSink, event);
+  const terminal = (reason: GeminiTerminalReason): GeminiRouteOutcome => {
+    emit({ kind: 'route-exhausted', mediaKind: input.mediaKind, reason, attemptsUsed });
+    return { kind: 'terminal', reason, attemptsUsed, attempts };
+  };
 
   for (const [candidateIndex, model] of candidates.entries()) {
     if (!input.pinned && runtime.cooldowns.isCooling('gemini', model, runtime.now())) {
       exhaustedCandidates.add(model);
+      recoveryTransition = true;
+      emit({ kind: 'cooldown-skipped', provider: 'gemini', model, mediaKind: input.mediaKind });
       continue;
     }
     if (attemptsUsed >= input.maxAttempts) break;
     if (runtime.now() >= deadline) {
-      return { kind: 'terminal', reason: 'deadline-terminated', attemptsUsed, attempts };
+      return terminal('deadline-terminated');
     }
 
     attemptsUsed += 1;
+    emit({
+      kind: 'attempt-started', provider: 'gemini', model,
+      mediaKind: input.mediaKind, attempt: attemptsUsed
+    });
     try {
       const result = await runtime.invokePreparedModel(model);
+      if (recoveryTransition) {
+        emit({
+          kind: 'fallback-succeeded', provider: 'gemini', model,
+          mediaKind: input.mediaKind, attempt: attemptsUsed
+        });
+      }
       return { kind: 'success', result };
     } catch (caught) {
       if (!isNormalizedFailure(caught)) {
@@ -123,8 +139,15 @@ export const runPreparedGeminiRoute = async (
       attempts.push({
         provider: 'gemini', model, attempt: attemptsUsed, category: caught.failure.category
       });
+      recoveryTransition = true;
+      emit({
+        kind: 'attempt-classified', provider: 'gemini', model,
+        mediaKind: input.mediaKind, attempt: attemptsUsed,
+        category: caught.failure.category,
+        operatorMessage: sanitizeOperatorMessage(caught.failure.safeMessage)
+      });
       if (decision.kind === 'fail-fast' && decision.terminalReason === 'envelope-unusable') {
-        return { kind: 'terminal', reason: 'envelope-unusable', attemptsUsed, attempts };
+        return terminal('envelope-unusable');
       }
       if (decision.kind === 'fallback-eligible') {
         exhaustedCandidates.add(model);
@@ -133,7 +156,7 @@ export const runPreparedGeminiRoute = async (
         );
       }
       if (runtime.now() >= deadline) {
-        return { kind: 'terminal', reason: 'deadline-terminated', attemptsUsed, attempts };
+        return terminal('deadline-terminated');
       }
       if (decision.kind === 'fail-fast') {
         return { kind: 'fail-fast', failure: caught.failure };
@@ -162,7 +185,7 @@ export const runPreparedGeminiRoute = async (
       );
       const beforeSleep = runtime.now();
       if (beforeSleep >= deadline || selectedDelayMs >= deadline - beforeSleep) {
-        return { kind: 'terminal', reason: 'deadline-terminated', attemptsUsed, attempts };
+        return terminal('deadline-terminated');
       }
       await runtime.sleep(selectedDelayMs);
     }
@@ -175,17 +198,30 @@ export const runPreparedGeminiRoute = async (
     && exhaustedCandidates.size === candidates.length;
   if (backupEligible && backup !== undefined) {
     if (runtime.cooldowns.isCooling(backup.provider, backup.model, runtime.now())) {
-      return { kind: 'terminal', reason: 'route-exhausted', attemptsUsed, attempts };
+      emit({
+        kind: 'cooldown-skipped', provider: backup.provider, model: backup.model,
+        mediaKind: input.mediaKind
+      });
+      return terminal('route-exhausted');
     }
     if (attemptsUsed >= input.maxAttempts) {
-      return { kind: 'terminal', reason: 'route-exhausted', attemptsUsed, attempts };
+      return terminal('route-exhausted');
     }
     if (runtime.now() >= deadline) {
-      return { kind: 'terminal', reason: 'deadline-terminated', attemptsUsed, attempts };
+      return terminal('deadline-terminated');
     }
     attemptsUsed += 1;
+    emit({
+      kind: 'attempt-started', provider: backup.provider, model: backup.model,
+      mediaKind: input.mediaKind, attempt: attemptsUsed
+    });
     try {
-      return { kind: 'success', result: await backup.invoke() };
+      const result = await backup.invoke();
+      emit({
+        kind: 'fallback-succeeded', provider: backup.provider, model: backup.model,
+        mediaKind: input.mediaKind, attempt: attemptsUsed
+      });
+      return { kind: 'success', result };
     } catch (caught) {
       const failure = isProviderFailure(caught)
         ? caught
@@ -201,67 +237,26 @@ export const runPreparedGeminiRoute = async (
         attempt: attemptsUsed,
         category: failure.category
       });
+      emit({
+        kind: 'attempt-classified', provider: backup.provider, model: backup.model,
+        mediaKind: input.mediaKind, attempt: attemptsUsed, category: failure.category,
+        operatorMessage: sanitizeOperatorMessage(failure.safeMessage)
+      });
       if (['rate-limit', 'timeout', 'temporary-service', 'network'].includes(failure.category)) {
         runtime.cooldowns.recordTransientFailure(
           backup.provider, backup.model, runtime.now(), input.cooldownSeconds * 1000
         );
       }
-      return {
-        kind: 'terminal',
-        reason: runtime.now() >= deadline ? 'deadline-terminated' : 'backup-exhausted',
-        attemptsUsed,
-        attempts
-      };
+      return terminal(runtime.now() >= deadline ? 'deadline-terminated' : 'backup-exhausted');
     }
   }
 
-  return { kind: 'terminal', reason: 'route-exhausted', attemptsUsed, attempts };
+  return terminal('route-exhausted');
 };
 
-export const GEMINI_TERMINAL_MAX_BYTES = 4096;
-export const GEMINI_TERMINAL_TRUNCATION_MARKER = '[...]';
-const MODEL_FIELD_MAX_BYTES = 320;
-const PROVIDER_FIELD_MAX_BYTES = 256;
-
-const escapedUnits = (value: string): string[] => [...value].map(character => {
-  const codePoint = character.codePointAt(0)!;
-  const isC0C1 = codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
-  const isBidi = codePoint === 0x061c || codePoint === 0x200e || codePoint === 0x200f
-    || (codePoint >= 0x202a && codePoint <= 0x202e)
-    || (codePoint >= 0x2066 && codePoint <= 0x2069);
-  if (isC0C1 || isBidi) return `\\u${codePoint.toString(16).toUpperCase().padStart(4, '0')}`;
-  if (character === '\\') return '\\\\';
-  if (character === '"') return '\\"';
-  return character;
-});
-
-const boundedEscapedField = (value: string, maximumBytes: number): string => {
-  const units = escapedUnits(value);
-  if (Buffer.byteLength(units.join(''), 'utf8') <= maximumBytes) return units.join('');
-  const budget = maximumBytes - Buffer.byteLength(GEMINI_TERMINAL_TRUNCATION_MARKER);
-  let bytes = 0;
-  let output = '';
-  for (const unit of units) {
-    const unitBytes = Buffer.byteLength(unit, 'utf8');
-    if (bytes + unitBytes > budget) break;
-    output += unit;
-    bytes += unitBytes;
-  }
-  return output + GEMINI_TERMINAL_TRUNCATION_MARKER;
-};
-
+export const GEMINI_TERMINAL_MAX_BYTES = RECOVERY_DIAGNOSTIC_MAX_BYTES;
+export const GEMINI_TERMINAL_TRUNCATION_MARKER = RECOVERY_DIAGNOSTIC_TRUNCATION_MARKER;
 export const formatGeminiTerminalMessage = (
   reason: GeminiTerminalReason,
   attempts: readonly StartedProviderAttempt[]
-): string => {
-  const records = attempts.map(attempt =>
-    `{provider="${boundedEscapedField(attempt.provider, PROVIDER_FIELD_MAX_BYTES)}",model="${boundedEscapedField(attempt.model, MODEL_FIELD_MAX_BYTES)}",attempt=${attempt.attempt},category=${attempt.category}}`
-  );
-  const output = `Gemini recovery terminated: reason=${reason}; attempts=[${records.join(',')}]`;
-  if (Buffer.byteLength(output, 'utf8') > GEMINI_TERMINAL_MAX_BYTES) {
-    // With maxAttempts <= 8 and the per-model budget this is unreachable for
-    // validated inputs; retain a fail-closed fixed terminal string if contracts drift.
-    return `Gemini recovery terminated: reason=${reason}; attempts=${GEMINI_TERMINAL_TRUNCATION_MARKER}`;
-  }
-  return output;
-};
+): string => formatRecoveryTerminalMessage('image', reason, attempts);

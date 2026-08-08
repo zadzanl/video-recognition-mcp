@@ -32,6 +32,7 @@ import type {
 } from '../types/provider.js';
 import { createProviderModelCooldownStore } from '../services/provider-cooldown-store.js';
 import type { OpenAICompatibleProviderConfig } from '../services/provider-config.js';
+import { getRecoveryTerminalMessage } from '../services/recovery-diagnostics.js';
 
 interface ServiceCalls {
   uploadedPaths: string[];
@@ -297,7 +298,8 @@ test('cooling pin bypasses the read gate and transient failure refreshes later s
     now: () => 11, sleep: async () => undefined, cooldowns
   }), request());
   assert.equal(later.calls.generations.length, 0);
-  assert.match(failure.safeMessage, /reason=route-exhausted/u);
+  assert.equal(failure.safeMessage, 'Recognition recovery failed.');
+  assert.match(getRecoveryTerminalMessage(failure) ?? '', /reason=route-exhausted/u);
 });
 
 test('allowlist rejection safe message never echoes requested, default, allowed models, or credentials', async () => {
@@ -351,6 +353,23 @@ test('mismatches and rejected video formats fail before service work', async () 
     assert.equal(calls.uploadedPaths.length, 0);
     assert.equal(calls.generations.length, 0);
   }
+});
+
+test('hostile runtime media kind fails closed before filepath or service access', async () => {
+  const { service, calls } = fakeService();
+  const provider = new GeminiRecognitionProvider(service, config());
+  const hostileMedia = 'image\u202ESECRET_MEDIA_KIND';
+  const hostileRequest = {
+    model: 'configured-model',
+    mediaKind: hostileMedia,
+    get filepath(): string { return unexpectedAccess('filepath'); },
+    get prompt(): string { return unexpectedAccess('prompt'); }
+  } as unknown as RecognitionRequest;
+  const failure = await captureFailure(provider, hostileRequest);
+  assert.equal(failure.category, 'invalid-request');
+  assert.equal(failure.safeMessage.includes(hostileMedia), false);
+  assert.equal(calls.uploadedPaths.length, 0);
+  assert.equal(calls.generations.length, 0);
 });
 
 test('upload and generation failures terminate after one attempt', async () => {
@@ -424,10 +443,12 @@ test('all transient route failures produce bounded typed terminal content', asyn
     sleep: async () => undefined
   }), request());
   assert.equal(failure.category, 'temporary-service');
-  assert.match(failure.safeMessage, /reason=route-exhausted/u);
-  assert.match(failure.safeMessage, /model="primary".*attempt=1.*model="secondary".*attempt=2/u);
-  assert.equal(Buffer.byteLength(failure.safeMessage, 'utf8') <= 4096, true);
-  assert.equal(failure.safeMessage.includes('RESOURCE_EXHAUSTED'), false);
+  assert.equal(failure.safeMessage, 'Recognition recovery failed.');
+  const terminal = getRecoveryTerminalMessage(failure) ?? '';
+  assert.match(terminal, /reason=route-exhausted/u);
+  assert.match(terminal, /model=\\?"primary\\?".*attempt=1.*model=\\?"secondary\\?".*attempt=2/u);
+  assert.equal(Buffer.byteLength(terminal, 'utf8') <= 4096, true);
+  assert.equal(terminal.includes('RESOURCE_EXHAUSTED'), false);
   assert.deepEqual(calls.uploadedPaths, ['fixture.png']);
   assert.deepEqual(calls.generations.map(call => call.model), ['primary', 'secondary']);
 });
@@ -466,7 +487,8 @@ test('pinned transient call bypasses eligibility and never falls through to rout
     sleep: async () => undefined,
     cooldowns
   }), request({ model: 'later' }));
-  assert.match(failure.safeMessage, /reason=route-exhausted/u);
+  assert.equal(failure.safeMessage, 'Recognition recovery failed.');
+  assert.match(getRecoveryTerminalMessage(failure) ?? '', /reason=route-exhausted/u);
   assert.deepEqual(calls.generations.map(call => call.model), ['later']);
   assert.equal(cooldowns.isCooling('gemini', 'later', 1), true);
 });
@@ -576,10 +598,12 @@ test('backup unsupported media category remains verbatim in final bounded diagno
         }
       }
     ), request({ filepath }));
-    assert.match(failure.safeMessage, /reason=backup-exhausted/u);
-    assert.match(failure.safeMessage, /category=unsupported-media/u);
-    assert.equal(failure.safeMessage.includes('secret should not appear'), false);
-    assert.equal(Buffer.byteLength(failure.safeMessage, 'utf8') <= 4096, true);
+    assert.equal(failure.safeMessage, 'Recognition recovery failed.');
+    const terminal = getRecoveryTerminalMessage(failure) ?? '';
+    assert.match(terminal, /reason=backup-exhausted/u);
+    assert.match(terminal, /category=unsupported-media/u);
+    assert.equal(terminal.includes('secret should not appear'), false);
+    assert.equal(Buffer.byteLength(terminal, 'utf8') <= 4096, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
