@@ -1,10 +1,10 @@
 <!--
 status: active
-phase: phase-6-documentation-and-verification
-sprint: provider-foundation-first-sprint
-last_modified: 2026-08-06
-agent_notes: "Documents selectable Gemini and OpenAI-compatible providers and operator security boundaries."
-insights: "Manual AbortController/setTimeout composition sets the Node floor at 18.0.0; OpenRouter video_url is not portable across arbitrary OpenAI-compatible endpoints."
+phase: change-b-group-7-documentation-and-verification
+sprint: gemini-model-fallback-and-rate-limit-recovery
+last_modified: 2026-08-08
+agent_notes: "Adds a concise entry point to the canonical opt-in recovery, rollback, and incident guide."
+insights: "Manual AbortController/setTimeout composition sets the Node floor at 18.0.0; OpenRouter video_url is not portable across arbitrary OpenAI-compatible endpoints. Opt-in recovery is documented once in docs/RECOVERY.md."
 -->
 
 # MCP Video Recognition Server
@@ -109,7 +109,11 @@ Only variables for the selected provider are parsed and validated. Malformed var
 | `GEMINI_MODEL` | No | `gemini-2.0-flash` | One model identifier, at most 200 Unicode scalar values. |
 | `GEMINI_MODEL_ALLOWLIST` | No | Unrestricted | Comma-separated exact model identifiers. |
 
-Gemini preserves its existing upload/cache processing path and its 300000 ms video-processing wait; the resulting timeout failure code is `GEMINI_VIDEO_PROCESSING_TIMEOUT`. This is not an environment variable. Gemini has no adapter-wide request deadline. The selected Gemini configuration fails startup if the deprecated alias `GEMINI_MODELS` is present, including when it is empty.
+Gemini preserves its existing upload/cache processing path and its 300000 ms video-processing wait; the resulting timeout failure code is `GEMINI_VIDEO_PROCESSING_TIMEOUT`. This is not an environment variable. Gemini has no adapter-wide request deadline. `GEMINI_MODELS` is reserved for the opt-in ordered recovery route documented below; when present, it cannot be combined with `GEMINI_MODEL`.
+
+### Gemini Recovery and Fallback
+
+Gemini model recovery and the final OpenAI-compatible backup are opt-in. See the [Provider Recovery Reference](docs/RECOVERY.md) for route configuration, attempt/deadline behavior, backoff and process-local cooldown, cost/privacy implications, rollback ordering, and backup credential-incident response.
 
 ### OpenAI-Compatible Variables
 
@@ -221,7 +225,7 @@ Operators own the `ALLOWED_MEDIA_ROOTS` boundary. Configure only narrow, operato
 
 ### Attempt and Cancellation Semantics
 
-Each tool call makes at most one provider recognition attempt. There is no application-level retry, fallback, cooldown, parallel inference, provider substitution, or model substitution. `Retry-After` is diagnostic only and never triggers a retry.
+Without opt-in Gemini recovery configuration, each tool call retains the one-model, one-attempt provider behavior. Recovery remains sequential and bounded; there is no parallel inference or silent model/provider substitution. See the [Provider Recovery Reference](docs/RECOVERY.md) for the exact opt-in attempt, timing, cooldown, and final-backup semantics.
 
 For OpenAI-compatible calls, caller abort maps to `cancelled` / `CALLER_CANCELLED`; expiration of the adapter's private timer maps to `timeout` / `ADAPTER_TIMEOUT`. Gemini keeps its 300000 ms video-processing wait, which maps to `timeout` / `GEMINI_VIDEO_PROCESSING_TIMEOUT`, and has no adapter-wide deadline.
 
