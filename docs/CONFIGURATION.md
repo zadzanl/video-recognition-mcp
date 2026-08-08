@@ -59,6 +59,70 @@ You can also enable the optional OpenRouter backup by adding `GEMINI_BACKUP_ENAB
 
 See `mcp-json-example/gemini-recovery-example-MCP.json` for a ready-to-use VS Code MCP config file.
 
+## Full Example (All Variables)
+
+This example shows every supported variable in one place. The Gemini and OpenAI-compatible sections are alternatives selected by `RECOGNITION_PROVIDER`. Values shown are defaults or placeholders; adjust to your setup.
+
+`GEMINI_MODEL` and `GEMINI_MODELS` cannot be combined (setting both fails startup), so the two variants are shown separately below. All other variables are common to both variants.
+
+Variant A — single Gemini model (`GEMINI_MODEL`), no recovery route:
+
+```json
+{
+  "mcpServers": {
+    "video-recognition-full": {
+      "command": "node",
+      "args": [
+        "/path/to/mcp-video-recognition/dist/index.js"
+      ],
+      "env": {
+        "RECOGNITION_PROVIDER": "gemini",
+        "TRANSPORT_TYPE": "stdio",
+        "PORT": "3000",
+        "LOG_LEVEL": "fatal",
+
+        "GOOGLE_API_KEY": "your_google_api_key",
+        "GEMINI_MODEL": "gemini-2.0-flash",
+        "GEMINI_MODEL_ALLOWLIST": "gemini-2.0-flash, gemini-2.5-flash",
+
+        "GEMINI_BACKUP_ENABLED": "false",
+
+        "OPENAI_COMPATIBLE_API_KEY": "your_openrouter_api_key",
+        "OPENAI_COMPATIBLE_BASE_URL": "https://openrouter.ai/api/v1",
+        "OPENAI_COMPATIBLE_MODEL": "your_openrouter_model_id",
+        "OPENAI_COMPATIBLE_PROVIDER_LABEL": "OpenRouter",
+        "OPENAI_COMPATIBLE_MODEL_ALLOWLIST": "",
+        "OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECONDS": "60",
+        "OPENAI_COMPATIBLE_MAX_RESPONSE_BYTES": "1048576",
+        "MAX_INLINE_MEDIA_BYTES": "20971520",
+        "ALLOWED_MEDIA_ROOTS": "/operator-controlled/media",
+        "ALLOW_INSECURE_LOCAL_OPENAI_COMPATIBLE": "false"
+      },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+Variant B — Gemini recovery route (`GEMINI_MODELS`) with model fallback. Replace the `GEMINI_MODEL` line from Variant A with:
+
+```json
+        "GEMINI_MODELS": "gemini-2.5-flash, gemini-2.0-flash, gemini-2.0-flash-lite",
+        "GEMINI_MAX_ATTEMPTS": "4",
+        "GEMINI_RECOVERY_DEADLINE_SECONDS": "30",
+        "GEMINI_BASE_BACKOFF_MS": "250",
+        "GEMINI_MAX_BACKOFF_MS": "2000",
+        "GEMINI_COOLDOWN_SECONDS": "60",
+```
+
+Notes on combining variables:
+
+- `GEMINI_MODEL` and `GEMINI_MODELS` cannot be used together. Setting both fails startup.
+- `GEMINI_BACKUP_ENABLED=true` requires the full OpenAI-compatible block including `ALLOWED_MEDIA_ROOTS`.
+- `ALLOW_INSECURE_LOCAL_OPENAI_COMPATIBLE` only applies when `RECOGNITION_PROVIDER` is `openai-compatible`.
+- Variables for the unselected provider are ignored (but both credential sets can be present).
+
 ## OpenAI-Compatible Variables
 
 | Variable | Required | Default | Rules |
