@@ -15,6 +15,8 @@ import { createAudioRecognitionTool } from '../tools/audio-recognition.js';
 import { createImageRecognitionTool } from '../tools/image-recognition.js';
 import { createVideoRecognitionTool } from '../tools/video-recognition.js';
 import { createProviderFailure } from '../services/provider-failure.js';
+import { mapRecognitionToolFailure } from '../tools/recognition-tool-failure.js';
+import { createRecoveryTerminalFailure } from '../services/recovery-diagnostics.js';
 import type {
   MediaKind,
   ProviderCallOptions,
@@ -138,7 +140,7 @@ test('successful recognition maps to the MCP success result shape', async () => 
   }
 });
 
-test('ProviderFailure maps to isError with the safe message', async () => {
+test('ProviderFailure maps to category-only MCP content without safeMessage', async () => {
   for (const toolCase of toolCases) {
     const { provider } = createRecordingProvider({
       failure: createProviderFailure({
@@ -156,14 +158,14 @@ test('ProviderFailure maps to isError with the safe message', async () => {
     assert.deepEqual(result, {
       content: [{
         type: 'text',
-        text: `Error processing ${toolCase.mediaLabel}: ${toolCase.mediaLabel} safe failure message`
+        text: `Error processing ${toolCase.mediaLabel}: Recognition failed: provider=gemini; media=${toolCase.mediaKind}; category=rate-limit`
       }],
       isError: true
     });
   }
 });
 
-test('non-ProviderFailure errors map to isError with generic error text', async () => {
+test('non-ProviderFailure errors map to fixed generic MCP content', async () => {
   for (const toolCase of toolCases) {
     const { provider } = createRecordingProvider({
       failure: new Error(`${toolCase.mediaLabel} internal detail`)
@@ -176,7 +178,7 @@ test('non-ProviderFailure errors map to isError with generic error text', async 
     assert.deepEqual(result, {
       content: [{
         type: 'text',
-        text: `Error processing ${toolCase.mediaLabel}: ${toolCase.mediaLabel} internal detail`
+        text: `Error processing ${toolCase.mediaLabel}: Recognition failed: media=${toolCase.mediaKind}; category=unknown`
       }],
       isError: true
     });
@@ -204,11 +206,37 @@ test('failure cause is not exposed in the MCP result', async () => {
     assert.deepEqual(result, {
       content: [{
         type: 'text',
-        text: `Error processing ${toolCase.mediaLabel}: credentials rejected`
+        text: `Error processing ${toolCase.mediaLabel}: Recognition failed: provider=openai-compatible; media=${toolCase.mediaKind}; category=authentication`
       }],
       isError: true
     });
   }
+});
+
+test('hostile safeMessage is sanitized only for operator output and absent from terminal output', () => {
+  const hostile = 'api_key=HOSTILE_SAFE_MESSAGE_SENTINEL prompt="PRIVATE_PROMPT"';
+  const mapped = mapRecognitionToolFailure(createProviderFailure({
+    provider: 'openai-compatible', category: 'authentication', safeMessage: hostile,
+    cause: new Error('RAW_CAUSE_SENTINEL')
+  }), 'image');
+  assert.equal(mapped.terminalMessage.includes('HOSTILE_SAFE_MESSAGE_SENTINEL'), false);
+  assert.equal(mapped.terminalMessage.includes('PRIVATE_PROMPT'), false);
+  assert.equal(mapped.operatorMessage.includes('HOSTILE_SAFE_MESSAGE_SENTINEL'), false);
+  assert.equal(mapped.operatorMessage.includes('PRIVATE_PROMPT'), false);
+  assert.equal(mapped.operatorMessage.includes('RAW_CAUSE_SENTINEL'), false);
+  assert.equal(mapped.operatorMessage.includes('<redacted>'), true);
+  assert.equal(Buffer.byteLength(mapped.operatorMessage, 'utf8') <= 4096, true);
+});
+
+test('trusted recovery terminal diagnostic crosses the tool boundary without safeMessage', () => {
+  const failure = createRecoveryTerminalFailure({
+    provider: 'gemini', category: 'temporary-service', mediaKind: 'audio',
+    reason: 'deadline-terminated',
+    attempts: [{ provider: 'gemini', model: 'model', attempt: 1, category: 'timeout' }]
+  });
+  const mapped = mapRecognitionToolFailure(failure, 'audio');
+  assert.match(mapped.terminalMessage, /media=audio.*reason=deadline-terminated/u);
+  assert.equal(mapped.terminalMessage.includes(failure.safeMessage), false);
 });
 
 test('Gemini startup composes one shared cooldown store and only the configured enabled backup', async () => {
@@ -219,5 +247,9 @@ test('Gemini startup composes one shared cooldown store and only the configured 
   assert.match(source, /new GeminiRecognitionProvider\(service, providerConfig, \{/u);
   assert.match(source, /cooldowns,/u);
   assert.match(source, /backupProvider/u);
+  assert.match(source, /diagnosticSink/u);
+  assert.match(source, /formatRecoveryDiagnosticEvent/u);
+  assert.match(source, /log\.info\(message\);/u);
+  assert.match(source, /log\.warn\(message\);/u);
   assert.doesNotMatch(source, /GEMINI_BACKUP_MODEL|OPENROUTER_MODEL/u);
 });

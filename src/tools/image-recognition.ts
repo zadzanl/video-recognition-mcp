@@ -1,15 +1,15 @@
 /**
  * Image recognition tool for MCP server
  * status: active
- * phase: phase-5-tool-server-wiring
+ * phase: change-b-group-6-observability
  * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-06
- * agent_notes: "Tool boundary is provider-neutral; file and format validation moved into provider adapters."
- * insights: "Schema owns the sole prompt default; providers throw ProviderFailure instead of returning isError envelopes. Cause values never cross the MCP boundary."
+ * last_modified: 2026-08-08
+ * agent_notes: "Tool logs fixed actions and uses the shared secure failure mapper."
+ * insights: "Request paths/prompts/results and caught errors never reach Logger or terminal MCP content."
  */
 
 import { createLogger } from '../utils/logger.js';
-import { isProviderFailure } from '../services/provider-failure.js';
+import { mapRecognitionToolFailure } from './recognition-tool-failure.js';
 import { ImageRecognitionParamsSchema } from '../types/index.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { ImageRecognitionParams } from '../types/index.js';
@@ -24,8 +24,7 @@ export const createImageRecognitionTool = (provider: RecognitionProvider) => {
     inputSchema: ImageRecognitionParamsSchema,
     callback: async (args: ImageRecognitionParams, extra: { signal: AbortSignal }): Promise<CallToolResult> => {
       try {
-        log.info(`Processing image recognition request for file: ${args.filepath}`);
-        log.verbose('Image recognition request', JSON.stringify(args));
+        log.info('Processing image recognition request');
 
         const request: RecognitionRequest = {
           filepath: args.filepath,
@@ -38,7 +37,6 @@ export const createImageRecognitionTool = (provider: RecognitionProvider) => {
         const result = await provider.recognize(request, { signal: extra.signal });
 
         log.info('Image recognition completed successfully');
-        log.verbose('Image recognition result', JSON.stringify(result));
 
         return {
           content: [
@@ -49,16 +47,14 @@ export const createImageRecognitionTool = (provider: RecognitionProvider) => {
           ]
         };
       } catch (error) {
-        log.error('Error in image recognition tool', error);
-        const errorMessage = isProviderFailure(error)
-          ? error.safeMessage
-          : error instanceof Error ? error.message : String(error);
+        const failure = mapRecognitionToolFailure(error, 'image');
+        log.error(failure.operatorMessage);
 
         return {
           content: [
             {
               type: 'text',
-              text: `Error processing image: ${errorMessage}`
+              text: `Error processing image: ${failure.terminalMessage}`
             }
           ],
           isError: true

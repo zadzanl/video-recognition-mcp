@@ -175,7 +175,7 @@ test('tools forward explicit prompt and model and retain success envelopes', asy
   }
 });
 
-test('tools map thrown provider failures to isError envelopes with safe messages', async () => {
+test('tools map thrown provider failures to category-only isError envelopes', async () => {
   for (const [index, toolCase] of toolCases.entries()) {
     const filepath = join(temporaryDirectory, `provider-failure-${index}${toolCase.extension}`);
     await writeFile(filepath, 'fixture');
@@ -194,14 +194,14 @@ test('tools map thrown provider failures to isError envelopes with safe messages
     assert.deepEqual(result, {
       content: [{
         type: 'text',
-        text: `Error processing ${toolCase.mediaLabel}: ${toolCase.mediaLabel} provider failure`
+        text: `Error processing ${toolCase.mediaLabel}: Recognition failed: provider=gemini; media=${toolCase.mediaKind}; category=temporary-service`
       }],
       isError: true
     });
   }
 });
 
-test('tools retain thrown-error MCP envelopes', async () => {
+test('tools retain generic thrown-error MCP envelopes without raw messages', async () => {
   for (const [index, toolCase] of toolCases.entries()) {
     const filepath = join(temporaryDirectory, `thrown-error-${index}${toolCase.extension}`);
     await writeFile(filepath, 'fixture');
@@ -216,7 +216,7 @@ test('tools retain thrown-error MCP envelopes', async () => {
     assert.deepEqual(result, {
       content: [{
         type: 'text',
-        text: `Error processing ${toolCase.mediaLabel}: ${toolCase.mediaLabel} upload failed`
+        text: `Error processing ${toolCase.mediaLabel}: Recognition failed: media=${toolCase.mediaKind}; category=unknown`
       }],
       isError: true
     });
