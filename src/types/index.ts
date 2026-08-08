@@ -1,9 +1,15 @@
 /**
  * Type definitions for the MCP server
+ * status: active
+ * phase: checkpoint-3-schema-default-ownership
+ * sprint: provider-foundation-first-sprint
+ * last_modified: 2026-08-02
+ * agent_notes: "RecognitionParamsSchema is the sole omitted-prompt default owner."
+ * insights: "modelname remains optional and is forwarded as undefined when omitted."
  */
 
 import { z } from 'zod';
-import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 /**
  * Common parameters for all recognition tools
@@ -11,8 +17,18 @@ import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 export const RecognitionParamsSchema = z.object({
   filepath: z.string().describe('Path to the media file to analyze'),
   prompt: z.string().default('Describe this content').describe('Custom prompt for the recognition'),
-  modelname: z.string().default('gemini-2.0-flash').describe('Gemini model to use for recognition')
+  modelname: z.string().optional().describe('Model override to use for recognition')
 });
+
+export type {
+  MediaKind,
+  ProviderCallOptions,
+  ProviderFailure,
+  ProviderFailureCategory,
+  RecognitionProvider,
+  RecognitionRequest,
+  RecognitionResult
+} from './provider.js';
 
 export type RecognitionParams = z.infer<typeof RecognitionParamsSchema>;
 
@@ -40,8 +56,8 @@ export type AudioRecognitionParams = z.infer<typeof AudioRecognitionParamsSchema
 export interface ToolDefinition {
   name: string;
   description: string;
-  inputSchema: z.ZodObject<any>;
-  callback: (args: any) => Promise<CallToolResult>;
+  inputSchema: z.ZodObject<z.ZodRawShape>;
+  callback: (args: unknown) => Promise<CallToolResult>;
 }
 
 /**

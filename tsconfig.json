@@ -8,6 +8,7 @@
     "outDir": "dist",
     "sourceMap": true,
     "declaration": true,
+    "rootDir": "src",
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true

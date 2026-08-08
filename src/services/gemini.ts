@@ -1,5 +1,11 @@
 /**
  * Service for interacting with Google's Gemini API
+ * status: active
+ * phase: checkpoint-4-gemini-adapter
+ * sprint: provider-foundation-first-sprint
+ * last_modified: 2026-08-03
+ * agent_notes: "Throwing generation seam and owned video-timeout identity; legacy wrapper remains compatible."
+ * insights: "processFileOrThrow preserves original throws; remove the omitted-model bridge at checkpoint 7."
  */
 
 import { 
@@ -8,6 +14,7 @@ import {
   createPartFromUri
 } from '@google/genai';
 import { createLogger } from '../utils/logger.js';
+import { DEFAULT_GEMINI_MODEL } from './provider-config.js';
 import type { GeminiConfig, GeminiFile, GeminiResponse, CachedFile, ProcessedGeminiFile } from '../types/index.js';
 import { FileState } from '../types/index.js';
 import * as fs from 'node:fs';
@@ -16,9 +23,11 @@ import * as crypto from 'node:crypto';
 
 const log = createLogger('GeminiService');
 
+export class GeminiVideoProcessingTimeoutError extends Error {}
+
 export class GeminiService {
   private readonly client: GoogleGenAI;
-  private fileCache: Map<string, CachedFile> = new Map();
+  private fileCache = new Map<string, CachedFile>();
   private readonly cacheExpiration = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
 
   constructor(config: GeminiConfig) {
@@ -94,7 +103,9 @@ export class GeminiService {
     while (currentFile.state === FileState.PROCESSING) {
       // Check if we've exceeded the maximum wait time
       if (Date.now() - startTime > maxWaitTimeMs) {
-        throw new Error(`Timeout waiting for video processing: ${file.name}`);
+        throw new GeminiVideoProcessingTimeoutError(
+          `Timeout waiting for video processing: ${file.name}`
+        );
       }
       
       // Wait 2 seconds before checking again
@@ -136,8 +147,8 @@ export class GeminiService {
       log.debug(`File checksum: ${checksum}`);
       
       // Check if file is in cache and still valid
-      if (this.isCacheValid(checksum)) {
-        const cachedFile = this.fileCache.get(checksum)!;
+      const cachedFile = this.fileCache.get(checksum);
+      if (cachedFile && this.isCacheValid(checksum)) {
         log.info(`Using cached file: ${cachedFile.name}`);
         
         // Return cached file info
@@ -200,12 +211,12 @@ export class GeminiService {
         
         // Update cache with processed file
         this.fileCache.set(checksum, {
-          fileId: processedFile.name!,
+          fileId: processedFile.name,
           checksum,
           uri: processedFile.uri,
           mimeType: processedFile.mimeType,
-          name: processedFile.name!,
-          state: processedFile.state!,
+          name: processedFile.name,
+          state: processedFile.state,
           timestamp: Date.now()
         });
         
@@ -235,29 +246,38 @@ export class GeminiService {
   }
 
   /**
-   * Process a file with Gemini API
+   * Process a file with Gemini API and preserve generation failures
    */
-  async processFile(file: GeminiFile, prompt: string, modelName: string): Promise<GeminiResponse> {
+  async processFileOrThrow(
+    file: GeminiFile,
+    prompt: string,
+    modelName: string
+  ): Promise<GeminiResponse> {
+    log.debug(`Processing file with model ${modelName}`);
+    log.verbose('Processing with parameters', JSON.stringify({ file, prompt, modelName }));
+
+    const response = await this.client.models.generateContent({
+      model: modelName,
+      contents: createUserContent([
+        createPartFromUri(file.uri, file.mimeType),
+        prompt
+      ])
+    });
+
+    log.debug('Received response from Gemini API');
+    log.verbose('Gemini API response', JSON.stringify(response));
+
+    return {
+      text: response.text || ''
+    };
+  }
+
+  /**
+   * Compatibility wrapper for direct service callers
+   */
+  async processFile(file: GeminiFile, prompt: string, modelName?: string): Promise<GeminiResponse> {
     try {
-      log.debug(`Processing file with model ${modelName}`);
-      log.verbose('Processing with parameters', JSON.stringify({ file, prompt, modelName }));
-      
-      const response = await this.client.models.generateContent({
-        model: modelName,
-        contents: createUserContent([
-          createPartFromUri(file.uri, file.mimeType),
-          prompt
-        ])
-      });
-      
-      log.debug('Received response from Gemini API');
-      log.verbose('Gemini API response', JSON.stringify(response));
-      
-      const responseText = response.text || '';
-      
-      return {
-        text: responseText
-      };
+      return await this.processFileOrThrow(file, prompt, modelName ?? DEFAULT_GEMINI_MODEL);
     } catch (error) {
       log.error('Error processing file with Gemini API', error);
       return {

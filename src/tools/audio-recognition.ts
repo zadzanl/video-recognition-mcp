@@ -1,67 +1,45 @@
 /**
  * Audio recognition tool for MCP server
+ * status: active
+ * phase: phase-5-tool-server-wiring
+ * sprint: provider-foundation-first-sprint
+ * last_modified: 2026-08-06
+ * agent_notes: "Tool boundary is provider-neutral; file and format validation moved into provider adapters."
+ * insights: "Schema owns the sole prompt default; providers throw ProviderFailure instead of returning isError envelopes. Cause values never cross the MCP boundary."
  */
 
-import { z } from 'zod';
 import { createLogger } from '../utils/logger.js';
-import { GeminiService } from '../services/gemini.js';
+import { isProviderFailure } from '../services/provider-failure.js';
 import { AudioRecognitionParamsSchema } from '../types/index.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { AudioRecognitionParams } from '../types/index.js';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
+import type { RecognitionProvider, RecognitionRequest } from '../types/provider.js';
 
 const log = createLogger('AudioRecognitionTool');
 
-export const createAudioRecognitionTool = (geminiService: GeminiService) => {
+export const createAudioRecognitionTool = (provider: RecognitionProvider) => {
   return {
     name: 'audio_recognition',
-    description: 'Analyze and transcribe audio using Google Gemini AI',
+    description: 'Analyze and transcribe audio using the configured recognition provider',
     inputSchema: AudioRecognitionParamsSchema,
-    callback: async (args: AudioRecognitionParams): Promise<CallToolResult> => {
+    callback: async (args: AudioRecognitionParams, extra: { signal: AbortSignal }): Promise<CallToolResult> => {
       try {
         log.info(`Processing audio recognition request for file: ${args.filepath}`);
         log.verbose('Audio recognition request', JSON.stringify(args));
-        
-        // Verify file exists
-        if (!fs.existsSync(args.filepath)) {
-          throw new Error(`Audio file not found: ${args.filepath}`);
-        }
-        
-        // Verify file is an audio
-        const ext = path.extname(args.filepath).toLowerCase();
-        if (!['.mp3', '.wav', '.ogg'].includes(ext)) {
-          throw new Error(`Unsupported audio format: ${ext}. Supported formats are: .mp3, .wav, .ogg`);
-        }
-        
-        // Default prompt if not provided
-        const prompt = args.prompt || 'Describe this audio';
-        const modelName = args.modelname || 'gemini-2.0-flash';
-        
-        // Upload the file
-        log.info('Uploading audio file...');
-        const file = await geminiService.uploadFile(args.filepath);
-        
-        // Process with Gemini
+
+        const request: RecognitionRequest = {
+          filepath: args.filepath,
+          prompt: args.prompt,
+          mediaKind: 'audio',
+          model: args.modelname
+        };
+
         log.info('Generating content from audio...');
-        const result = await geminiService.processFile(file, prompt, modelName);
-        
-        if (result.isError) {
-          log.error(`Error in audio recognition: ${result.text}`);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: result.text
-              }
-            ],
-            isError: true
-          };
-        }
-        
+        const result = await provider.recognize(request, { signal: extra.signal });
+
         log.info('Audio recognition completed successfully');
         log.verbose('Audio recognition result', JSON.stringify(result));
-        
+
         return {
           content: [
             {
@@ -72,8 +50,10 @@ export const createAudioRecognitionTool = (geminiService: GeminiService) => {
         };
       } catch (error) {
         log.error('Error in audio recognition tool', error);
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        
+        const errorMessage = isProviderFailure(error)
+          ? error.safeMessage
+          : error instanceof Error ? error.message : String(error);
+
         return {
           content: [
             {
