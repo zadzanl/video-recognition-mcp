@@ -27,6 +27,38 @@ Gemini keeps its upload/cache processing path and its up-to-300-second video wai
 
 Gemini model recovery and the final OpenAI-compatible backup are opt-in. See the [Provider Recovery Reference](RECOVERY.md) for route setup, attempt and deadline behavior, backoff and process-local cooldown, cost and privacy notes, rollback order, and backup credential incidents.
 
+### Gemini Recovery Example
+
+Set `GEMINI_MODELS` to a comma-separated list of Gemini models to try in order. The server starts with the first model and falls through to the next one when it gets a retryable error (rate limit, server error, timeout). If you do not set `GEMINI_MODELS`, the server uses the single `GEMINI_MODEL` (or the default `gemini-2.0-flash`) with no fallback.
+
+```json
+{
+  "mcpServers": {
+    "video-recognition-gemini-recovery": {
+      "command": "node",
+      "args": [
+        "/path/to/mcp-video-recognition/dist/index.js"
+      ],
+      "env": {
+        "GOOGLE_API_KEY": "your_google_api_key",
+        "GEMINI_MODELS": "gemini-2.5-flash, gemini-2.0-flash, gemini-2.0-flash-lite",
+        "GEMINI_MAX_ATTEMPTS": "4",
+        "GEMINI_COOLDOWN_SECONDS": "60",
+        "LOG_LEVEL": "warn"
+      },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+The example above tries `gemini-2.5-flash` first, then `gemini-2.0-flash`, then `gemini-2.0-flash-lite`. Each model gets at most one attempt, and the total across all models is capped by `GEMINI_MAX_ATTEMPTS`. A model that fails with a retryable error is skipped for `GEMINI_COOLDOWN_SECONDS` (60 seconds in this example).
+
+You can also enable the optional OpenRouter backup by adding `GEMINI_BACKUP_ENABLED=true` plus the full OpenAI-compatible config (see the OpenRouter example below). The backup runs at most once, after every Gemini model has failed or is in cooldown.
+
+See `mcp-json-example/gemini-recovery-example-MCP.json` for a ready-to-use VS Code MCP config file.
+
 ## OpenAI-Compatible Variables
 
 | Variable | Required | Default | Rules |
