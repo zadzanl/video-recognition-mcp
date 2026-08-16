@@ -1,10 +1,10 @@
 /**
  * status: active
- * phase: checkpoint-3-startup-configuration
- * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-02
- * agent_notes: "Environment-to-config loader invoked at startup before provider construction."
- * insights: "Only the selected provider is validated; roots are canonicalized at startup without requested-file access."
+ * phase: change-b-group-1-configuration
+ * sprint: gemini-model-fallback-and-rate-limit-recovery
+ * last_modified: 2026-08-07
+ * agent_notes: "Startup loader now exposes a validated Gemini recovery contract without implementing routing."
+ * insights: "GEMINI_MODELS is the sole unlocked alias; omitted routes retain one canonical model, while enabled backup reuses the Change A OpenAI-compatible loader. Runtime non-string identifiers fail closed before string operations."
  */
 
 import { realpath, stat } from 'node:fs/promises';
@@ -12,11 +12,26 @@ import path from 'node:path';
 
 export const DEFAULT_GEMINI_MODEL = 'gemini-2.0-flash';
 
+export type GeminiBackupConfig =
+  | { readonly enabled: false }
+  | { readonly enabled: true; readonly providerConfig: OpenAICompatibleProviderConfig };
+
+export interface GeminiRecoveryConfig {
+  readonly modelRoute: readonly string[];
+  readonly maxAttempts: number;
+  readonly deadlineSeconds: number;
+  readonly baseBackoffMs: number;
+  readonly maxBackoffMs: number;
+  readonly cooldownSeconds: number;
+  readonly backup: GeminiBackupConfig;
+}
+
 export interface GeminiProviderConfig {
   provider: 'gemini';
   apiKey: string;
   model: string;
   modelAllowlist?: readonly string[];
+  recovery: GeminiRecoveryConfig;
 }
 
 export interface OpenAICompatibleProviderConfig {
@@ -50,15 +65,16 @@ const asciiTrim = (value: string): string => {
   return value.slice(start, end);
 };
 
-const hasForbiddenIdentifierCharacter = (value: string): boolean => {
-  for (const character of value) {
-    const codePoint = character.codePointAt(0) ?? 0;
-    if (codePoint <= 0x1f || codePoint === 0x7f || codePoint === 0x2028 || codePoint === 0x2029) {
-      return true;
-    }
-  }
-  return false;
-};
+const hasForbiddenIdentifierCharacter = (value: string): boolean =>
+  /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(value);
+
+export const isValidProviderIdentifier = (
+  value: unknown,
+  maximumScalars: number
+): value is string => typeof value === 'string'
+  && value.length > 0
+  && [...value].length <= maximumScalars
+  && !hasForbiddenIdentifierCharacter(value);
 
 const hasForbiddenRawUrlCharacter = (value: string): boolean => {
   for (const character of value) {
@@ -93,10 +109,37 @@ const rejectAliases = (env: ProviderEnvironment, aliases: readonly string[]): vo
 };
 
 const parseIdentifier = (value: string, variable: string, maximumScalars: number): string => {
-  if (hasForbiddenIdentifierCharacter(value) || [...value].length > maximumScalars) {
+  if (!isValidProviderIdentifier(value, maximumScalars)) {
     throw configError(variable, 'contains an invalid identifier');
   }
   return value;
+};
+
+const parseModelRoute = (env: ProviderEnvironment): readonly string[] => {
+  const listVariable = 'GEMINI_MODELS';
+  const singleVariable = 'GEMINI_MODEL';
+  if (!hasVariable(env, listVariable)) {
+    return [parseIdentifier(
+      optionalValue(env, singleVariable) ?? DEFAULT_GEMINI_MODEL,
+      singleVariable,
+      200
+    )];
+  }
+  if (hasVariable(env, singleVariable)) {
+    throw configError(listVariable, `cannot be used with ${singleVariable}`);
+  }
+
+  const route: string[] = [];
+  const seen = new Set<string>();
+  for (const segment of (env[listVariable] ?? '').split(',')) {
+    const model = asciiTrim(segment);
+    if (model.length === 0 || seen.has(model)) continue;
+    parseIdentifier(model, listVariable, 200);
+    seen.add(model);
+    route.push(model);
+  }
+  if (route.length === 0) throw configError(listVariable, 'must contain at least one model');
+  return route;
 };
 
 const parseAllowlist = (
@@ -135,6 +178,34 @@ const parseInteger = (
     throw configError(variable, `must be between ${minimum} and ${maximum}`);
   }
   return value;
+};
+
+const parseRecoveryInteger = (
+  env: ProviderEnvironment,
+  variable: string,
+  defaultValue: number,
+  minimum: number,
+  maximum: number
+): number => {
+  if (!hasVariable(env, variable)) return defaultValue;
+  const configured = asciiTrim(env[variable] ?? '');
+  if (!/^[0-9]+$/u.test(configured)) {
+    throw configError(variable, `must be a decimal integer between ${minimum} and ${maximum}`);
+  }
+  const value = Number(configured);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw configError(variable, `must be between ${minimum} and ${maximum}`);
+  }
+  return value;
+};
+
+const parseBackupEnabled = (env: ProviderEnvironment): boolean => {
+  const variable = 'GEMINI_BACKUP_ENABLED';
+  if (!hasVariable(env, variable)) return false;
+  const configured = asciiTrim(env[variable] ?? '');
+  if (configured === 'true') return true;
+  if (configured === 'false') return false;
+  throw configError(variable, 'must be true or false');
 };
 
 const parseInsecureLocal = (env: ProviderEnvironment): boolean => {
@@ -215,23 +286,6 @@ const parseAllowedRoots = async (env: ProviderEnvironment): Promise<readonly str
   return canonicalRoots;
 };
 
-const loadGeminiConfig = (env: ProviderEnvironment): GeminiProviderConfig => {
-  rejectAliases(env, ['GEMINI_MODELS']);
-  const model = parseIdentifier(
-    optionalValue(env, 'GEMINI_MODEL') ?? DEFAULT_GEMINI_MODEL,
-    'GEMINI_MODEL',
-    200
-  );
-  const modelAllowlist = parseAllowlist(env, 'GEMINI_MODEL_ALLOWLIST');
-
-  return {
-    provider: 'gemini',
-    apiKey: requiredValue(env, 'GOOGLE_API_KEY'),
-    model,
-    ...(modelAllowlist === undefined ? {} : { modelAllowlist })
-  };
-};
-
 const loadOpenAICompatibleConfig = async (
   env: ProviderEnvironment
 ): Promise<OpenAICompatibleProviderConfig> => {
@@ -283,6 +337,40 @@ const loadOpenAICompatibleConfig = async (
     ),
     allowedMediaRoots: await parseAllowedRoots(env),
     allowInsecureLocal
+  };
+};
+
+const loadGeminiConfig = async (env: ProviderEnvironment): Promise<GeminiProviderConfig> => {
+  const modelRoute = parseModelRoute(env);
+  const modelAllowlist = parseAllowlist(env, 'GEMINI_MODEL_ALLOWLIST');
+  const maxAttempts = parseRecoveryInteger(env, 'GEMINI_MAX_ATTEMPTS', 4, 1, 8);
+  const deadlineSeconds = parseRecoveryInteger(
+    env, 'GEMINI_RECOVERY_DEADLINE_SECONDS', 30, 1, 120
+  );
+  const baseBackoffMs = parseRecoveryInteger(env, 'GEMINI_BASE_BACKOFF_MS', 250, 0, 5000);
+  const maxBackoffMs = parseRecoveryInteger(env, 'GEMINI_MAX_BACKOFF_MS', 2000, 0, 10000);
+  const cooldownSeconds = parseRecoveryInteger(env, 'GEMINI_COOLDOWN_SECONDS', 60, 0, 600);
+  if (maxBackoffMs < baseBackoffMs) {
+    throw configError('GEMINI_MAX_BACKOFF_MS', 'must be greater than or equal to GEMINI_BASE_BACKOFF_MS');
+  }
+  const backup: GeminiBackupConfig = parseBackupEnabled(env)
+    ? { enabled: true, providerConfig: await loadOpenAICompatibleConfig(env) }
+    : { enabled: false };
+
+  return {
+    provider: 'gemini',
+    apiKey: requiredValue(env, 'GOOGLE_API_KEY'),
+    model: modelRoute[0]!,
+    ...(modelAllowlist === undefined ? {} : { modelAllowlist }),
+    recovery: {
+      modelRoute,
+      maxAttempts,
+      deadlineSeconds,
+      baseBackoffMs,
+      maxBackoffMs,
+      cooldownSeconds,
+      backup
+    }
   };
 };
 

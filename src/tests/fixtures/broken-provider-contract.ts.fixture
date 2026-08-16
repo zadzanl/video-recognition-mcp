@@ -1,0 +1,14 @@
+/**
+ * status: test-fixture
+ * phase: change-b-group-1a
+ * sprint: gemini-model-fallback-and-rate-limit-recovery
+ * last_modified: 2026-08-07
+ * agent_notes: "Deliberately invalid provider contract; this file must never compile successfully."
+ * insights: "RecognitionProvider implementations must return the success-only RecognitionResult shape."
+ */
+
+import type { RecognitionProvider } from '../../../types/provider.js';
+
+export const brokenProvider: RecognitionProvider = {
+  recognize: async () => ({ isError: true })
+};

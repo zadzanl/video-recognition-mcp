@@ -58,7 +58,7 @@ const isCanonicalChild = (root: string, candidate: string): boolean => {
   return candidateForm.startsWith(rootForm + path.sep);
 };
 
-const canonicalizeContainedFile = async (
+export const canonicalizeContainedFile = async (
   filepath: string,
   roots: readonly string[]
 ): Promise<string> => {

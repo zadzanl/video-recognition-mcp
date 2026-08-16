@@ -1,14 +1,15 @@
 /**
  * status: active
- * phase: task-2.7-evidence-closure
- * sprint: provider-foundation-first-sprint
- * last_modified: 2026-08-04
- * agent_notes: "Credential-free direct matrix for strict Gemini adapter flow and structural failures; task 2.7 added no-echo rejection assertions."
- * insights: "Numeric statuses are synthetic contract fixtures; installed SDK message-only errors remain unknown. Allowlist rejection safeMessage never echoes requested/default/allowed models or credentials."
+ * phase: change-b-group-3-ordered-fallback
+ * sprint: gemini-model-fallback-and-rate-limit-recovery
+ * last_modified: 2026-08-07
+ * agent_notes: "Adapter integration covers one preparation, ordered models, one-element pins, and fresh post-preparation deadlines."
+ * insights: "Invalid/disallowed pins remain pre-I/O and route-immutable. Raw extraction is classifier-only. Production Gemini generation intentionally has no adapter-wide timeout; the router uses only a soft pre-start clock gate."
  */
 
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import {
@@ -23,7 +24,15 @@ import {
   type GeminiProviderConfig
 } from '../services/provider-config.js';
 import type { GeminiFile, GeminiResponse } from '../types/index.js';
-import type { ProviderFailure, RecognitionRequest } from '../types/provider.js';
+import type {
+  ProviderCallOptions,
+  ProviderFailure,
+  RecognitionProvider,
+  RecognitionRequest
+} from '../types/provider.js';
+import { createProviderModelCooldownStore } from '../services/provider-cooldown-store.js';
+import type { OpenAICompatibleProviderConfig } from '../services/provider-config.js';
+import { getRecoveryTerminalMessage } from '../services/recovery-diagnostics.js';
 
 interface ServiceCalls {
   uploadedPaths: string[];
@@ -35,12 +44,23 @@ interface FakeOptions {
   uploadError?: unknown;
   generationError?: unknown;
   text?: string;
+  onUpload?: () => void;
+  generate?: (model: string) => Promise<GeminiResponse> | GeminiResponse;
 }
 
 const config = (overrides: Partial<GeminiProviderConfig> = {}): GeminiProviderConfig => ({
   provider: 'gemini',
   apiKey: 'credential-free-test-key',
   model: 'configured-model',
+  recovery: {
+    modelRoute: ['configured-model'],
+    maxAttempts: 4,
+    deadlineSeconds: 30,
+    baseBackoffMs: 250,
+    maxBackoffMs: 2000,
+    cooldownSeconds: 60,
+    backup: { enabled: false }
+  },
   ...overrides
 });
 
@@ -49,6 +69,36 @@ const request = (overrides: Partial<RecognitionRequest> = {}): RecognitionReques
   prompt: 'describe fixture',
   mediaKind: 'image',
   ...overrides
+});
+
+const enabledBackupConfig = (
+  allowedMediaRoots: readonly string[],
+  overrides: Partial<GeminiProviderConfig['recovery']> = {}
+): GeminiProviderConfig => config({
+  recovery: {
+    modelRoute: ['configured-model'],
+    maxAttempts: 2,
+    deadlineSeconds: 30,
+    baseBackoffMs: 250,
+    maxBackoffMs: 2000,
+    cooldownSeconds: 60,
+    backup: {
+      enabled: true,
+      providerConfig: {
+        provider: 'openai-compatible',
+        apiKey: 'credential-free-backup-key',
+        baseUrl: new URL('https://example.test/v1/chat/completions'),
+        model: 'configured-backup-model',
+        providerLabel: 'Configured backup',
+        requestTimeoutSeconds: 60,
+        maxResponseBytes: 1024,
+        maxInlineMediaBytes: 1024,
+        allowedMediaRoots,
+        allowInsecureLocal: false
+      } satisfies OpenAICompatibleProviderConfig
+    },
+    ...overrides
+  }
 });
 
 const unexpectedAccess = (property: string): never => {
@@ -61,6 +111,7 @@ const fakeService = (options: FakeOptions = {}): { service: GeminiService; calls
   const service = {
     uploadFile: async (filepath: string): Promise<GeminiFile> => {
       calls.uploadedPaths.push(filepath);
+      options.onUpload?.();
       if (options.uploadError !== undefined) throw options.uploadError;
       return file;
     },
@@ -70,6 +121,7 @@ const fakeService = (options: FakeOptions = {}): { service: GeminiService; calls
       model: string
     ): Promise<GeminiResponse> => {
       calls.generations.push({ file: uploadedFile, prompt, model });
+      if (options.generate !== undefined) return options.generate(model);
       if (options.generationError !== undefined) throw options.generationError;
       return { text: options.text ?? 'recognized text' };
     },
@@ -79,6 +131,14 @@ const fakeService = (options: FakeOptions = {}): { service: GeminiService; calls
     }
   } as unknown as GeminiService;
   return { service, calls };
+};
+
+const sdkError = (status: number, providerCode: string): Error => {
+  const error = new Error(`got status: ${status} Status Text. ${JSON.stringify({
+    error: { code: status, status: providerCode }
+  })}`);
+  error.name = status < 500 ? 'ClientError' : 'ServerError';
+  return error;
 };
 
 const captureFailure = async (
@@ -156,6 +216,92 @@ test('allowlist uses exact equality and rejects before filepath or service work'
   assert.equal(rejected.calls.uploadedPaths.length, 0);
 });
 
+test('primary, later-route, and allowed off-route pins each make one call without route mutation', async () => {
+  const route = ['primary-model', 'later-model'] as const;
+  const configured = config({
+    model: route[0],
+    modelAllowlist: [...route, 'off-route-model'],
+    recovery: {
+      modelRoute: route,
+      maxAttempts: 4,
+      deadlineSeconds: 30,
+      baseBackoffMs: 250,
+      maxBackoffMs: 2000,
+      cooldownSeconds: 60,
+      backup: { enabled: false }
+    }
+  });
+  const routeBefore = [...configured.recovery.modelRoute];
+
+  for (const pin of ['primary-model', 'later-model', 'off-route-model']) {
+    const { service, calls } = fakeService();
+    const provider = new GeminiRecognitionProvider(service, configured);
+    await provider.recognize(request({ model: pin }));
+    assert.deepEqual(calls.uploadedPaths, ['fixture.png']);
+    assert.equal(calls.generations.length, 1);
+    assert.equal(calls.generations[0]?.model, pin);
+    assert.deepEqual(configured.recovery.modelRoute, routeBefore);
+  }
+});
+
+test('invalid pins fail before filepath, upload, or generation access', async () => {
+  for (const model of [
+    '', '😀'.repeat(201), `bad\u0000model`, `bad\u0085model`,
+    `bad\u200Emodel`, `bad\u202Emodel`, `bad\u2066model`, `bad\u2028model`
+  ]) {
+    const { service, calls } = fakeService();
+    const provider = new GeminiRecognitionProvider(service, config());
+    const hostileRequest = {
+      model,
+      get filepath(): string { return unexpectedAccess('filepath'); },
+      get prompt(): string { return unexpectedAccess('prompt'); },
+      get mediaKind(): 'image' { return unexpectedAccess('mediaKind'); }
+    } as RecognitionRequest;
+    const failure = await captureFailure(provider, hostileRequest);
+    assert.equal(failure.category, 'invalid-request');
+    assert.equal(failure.safeMessage, 'Requested model is invalid.');
+    if (model.length > 0) assert.equal(failure.safeMessage.includes(model), false);
+    assert.equal(calls.uploadedPaths.length, 0);
+    assert.equal(calls.generations.length, 0);
+  }
+});
+
+test('runtime non-string pin fails as invalid-request before filepath or service access', async () => {
+  const { service, calls } = fakeService();
+  const provider = new GeminiRecognitionProvider(service, config());
+  const hostileRequest = {
+    model: { length: 5 },
+    get filepath(): string { return unexpectedAccess('filepath'); },
+    get prompt(): string { return unexpectedAccess('prompt'); },
+    get mediaKind(): 'image' { return unexpectedAccess('mediaKind'); }
+  } as unknown as RecognitionRequest;
+
+  const failure = await captureFailure(provider, hostileRequest);
+  assert.equal(failure.category, 'invalid-request');
+  assert.equal(failure.safeMessage, 'Requested model is invalid.');
+  assert.equal(calls.uploadedPaths.length, 0);
+  assert.equal(calls.generations.length, 0);
+});
+
+test('cooling pin bypasses the read gate and transient failure refreshes later state', async () => {
+  const cooldowns = createProviderModelCooldownStore();
+  cooldowns.recordTransientFailure('gemini', 'configured-model', 0, 10);
+  const pinned = fakeService({ generationError: sdkError(503, 'UNAVAILABLE') });
+  await captureFailure(new GeminiRecognitionProvider(pinned.service, config(), {
+    now: () => 0, sleep: async () => undefined, cooldowns
+  }), request({ model: 'configured-model' }));
+  assert.equal(pinned.calls.generations.length, 1);
+  assert.equal(cooldowns.isCooling('gemini', 'configured-model', 11), true);
+
+  const later = fakeService();
+  const failure = await captureFailure(new GeminiRecognitionProvider(later.service, config(), {
+    now: () => 11, sleep: async () => undefined, cooldowns
+  }), request());
+  assert.equal(later.calls.generations.length, 0);
+  assert.equal(failure.safeMessage, 'Recognition recovery failed.');
+  assert.match(getRecoveryTerminalMessage(failure) ?? '', /reason=route-exhausted/u);
+});
+
 test('allowlist rejection safe message never echoes requested, default, allowed models, or credentials', async () => {
   const { service, calls } = fakeService();
   const provider = new GeminiRecognitionProvider(
@@ -209,6 +355,23 @@ test('mismatches and rejected video formats fail before service work', async () 
   }
 });
 
+test('hostile runtime media kind fails closed before filepath or service access', async () => {
+  const { service, calls } = fakeService();
+  const provider = new GeminiRecognitionProvider(service, config());
+  const hostileMedia = 'image\u202ESECRET_MEDIA_KIND';
+  const hostileRequest = {
+    model: 'configured-model',
+    mediaKind: hostileMedia,
+    get filepath(): string { return unexpectedAccess('filepath'); },
+    get prompt(): string { return unexpectedAccess('prompt'); }
+  } as unknown as RecognitionRequest;
+  const failure = await captureFailure(provider, hostileRequest);
+  assert.equal(failure.category, 'invalid-request');
+  assert.equal(failure.safeMessage.includes(hostileMedia), false);
+  assert.equal(calls.uploadedPaths.length, 0);
+  assert.equal(calls.generations.length, 0);
+});
+
 test('upload and generation failures terminate after one attempt', async () => {
   const upload = fakeService({ uploadError: new Error('upload secret') });
   const uploadFailure = await captureFailure(
@@ -229,35 +392,229 @@ test('upload and generation failures terminate after one attempt', async () => {
   assert.equal(generation.calls.generations.length, 1);
 });
 
-test('synthetic contract fixtures map only approved finite numeric statuses', async () => {
+test('exact permanent SDK envelopes fail fast with approved structured statuses', async () => {
   const mapped = [
     [400, 'invalid-request'], [401, 'authentication'], [402, 'billing'],
-    [403, 'permission'], [429, 'rate-limit'], [500, 'temporary-service'],
-    [503, 'temporary-service']
+    [403, 'permission']
   ] as const;
   for (const [status, category] of mapped) {
-    const { service } = fakeService({ generationError: { status } });
+    const { service } = fakeService({ generationError: sdkError(status, 'PERMANENT') });
     const failure = await captureFailure(new GeminiRecognitionProvider(service, config()), request());
     assert.equal(failure.category, category);
     assert.equal(failure.status, status);
   }
-
-  const inherited = Object.create({ status: 429 }) as object;
-  const inheritedService = fakeService({ generationError: inherited }).service;
-  const inheritedFailure = await captureFailure(
-    new GeminiRecognitionProvider(inheritedService, config()),
-    request()
-  );
-  assert.equal(inheritedFailure.category, 'rate-limit');
-  assert.equal(inheritedFailure.status, 429);
 });
 
-test('synthetic invalid and unmapped statuses remain unknown without status', async () => {
+test('one preparation supports ordered transient fallback and stops on exact success', async () => {
+  const configured = config({
+    model: 'primary',
+    recovery: {
+      modelRoute: ['primary', 'secondary', 'third'], maxAttempts: 3,
+      deadlineSeconds: 30, baseBackoffMs: 250, maxBackoffMs: 2000,
+      cooldownSeconds: 60, backup: { enabled: false }
+    }
+  });
+  const { service, calls } = fakeService({
+    generate: model => {
+      if (model === 'primary') throw sdkError(503, 'UNAVAILABLE');
+      return { text: 'secondary exact text' };
+    }
+  });
+  const result = await new GeminiRecognitionProvider(service, configured, {
+    sleep: async () => undefined
+  }).recognize(request());
+  assert.deepEqual(result, { text: 'secondary exact text' });
+  assert.deepEqual(calls.uploadedPaths, ['fixture.png']);
+  assert.deepEqual(calls.generations.map(call => call.model), ['primary', 'secondary']);
+  assert.equal(calls.wrapperCalls, 0);
+});
+
+test('all transient route failures produce bounded typed terminal content', async () => {
+  const configured = config({
+    model: 'primary',
+    recovery: {
+      modelRoute: ['primary', 'secondary'], maxAttempts: 2,
+      deadlineSeconds: 30, baseBackoffMs: 250, maxBackoffMs: 2000,
+      cooldownSeconds: 60, backup: { enabled: false }
+    }
+  });
+  const { service, calls } = fakeService({ generationError: sdkError(429, 'RESOURCE_EXHAUSTED') });
+  const failure = await captureFailure(new GeminiRecognitionProvider(service, configured, {
+    sleep: async () => undefined
+  }), request());
+  assert.equal(failure.category, 'temporary-service');
+  assert.equal(failure.safeMessage, 'Recognition recovery failed.');
+  const terminal = getRecoveryTerminalMessage(failure) ?? '';
+  assert.match(terminal, /reason=route-exhausted/u);
+  assert.match(terminal, /model=\\?"primary\\?".*attempt=1.*model=\\?"secondary\\?".*attempt=2/u);
+  assert.equal(Buffer.byteLength(terminal, 'utf8') <= 4096, true);
+  assert.equal(terminal.includes('RESOURCE_EXHAUSTED'), false);
+  assert.deepEqual(calls.uploadedPaths, ['fixture.png']);
+  assert.deepEqual(calls.generations.map(call => call.model), ['primary', 'secondary']);
+});
+
+test('long preparation receives a fresh deadline and preparation failure starts no generation', async () => {
+  let nowMs = 0;
+  const prepared = fakeService({ onUpload: () => { nowMs += 45_000; } });
+  const result = await new GeminiRecognitionProvider(prepared.service, config(), {
+    now: () => nowMs
+  }).recognize(request());
+  assert.deepEqual(result, { text: 'recognized text' });
+  assert.equal(prepared.calls.generations.length, 1);
+
+  const failed = fakeService({ uploadError: new Error('preparation secret') });
+  const failure = await captureFailure(new GeminiRecognitionProvider(failed.service, config(), {
+    now: () => { throw new Error('deadline must not start'); }
+  }), request());
+  assert.equal(failure.category, 'unknown');
+  assert.equal(failed.calls.generations.length, 0);
+});
+
+test('pinned transient call bypasses eligibility and never falls through to route', async () => {
+  const configured = config({
+    model: 'primary', modelAllowlist: ['primary', 'later', 'off-route'],
+    recovery: {
+      modelRoute: ['primary', 'later'], maxAttempts: 4,
+      deadlineSeconds: 30, baseBackoffMs: 250, maxBackoffMs: 2000,
+      cooldownSeconds: 60, backup: { enabled: false }
+    }
+  });
+  const { service, calls } = fakeService({ generationError: sdkError(503, 'UNAVAILABLE') });
+  const cooldowns = createProviderModelCooldownStore();
+  cooldowns.recordTransientFailure('gemini', 'later', 0, 60_000);
+  const failure = await captureFailure(new GeminiRecognitionProvider(service, configured, {
+    now: () => 0,
+    sleep: async () => undefined,
+    cooldowns
+  }), request({ model: 'later' }));
+  assert.equal(failure.safeMessage, 'Recognition recovery failed.');
+  assert.match(getRecoveryTerminalMessage(failure) ?? '', /reason=route-exhausted/u);
+  assert.deepEqual(calls.generations.map(call => call.model), ['later']);
+  assert.equal(cooldowns.isCooling('gemini', 'later', 1), true);
+});
+
+test('enabled backup receives a fresh canonical request without Gemini model and exact options', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gemini-backup-'));
+  try {
+    const filepath = path.join(root, 'fixture.png');
+    await writeFile(filepath, 'fixture');
+    const { service, calls } = fakeService({ generationError: sdkError(503, 'UNAVAILABLE') });
+    const backupCalls: { request: RecognitionRequest; options?: ProviderCallOptions }[] = [];
+    const backupProvider: RecognitionProvider = {
+      recognize: async (backupRequest, options) => {
+        backupCalls.push({ request: backupRequest, ...(options === undefined ? {} : { options }) });
+        return { text: ' exact backup result ' };
+      }
+    };
+    const controller = new AbortController();
+    const result = await new GeminiRecognitionProvider(
+      service,
+      enabledBackupConfig([root]),
+      { sleep: async () => undefined, backupProvider }
+    ).recognize(request({ filepath, prompt: 'exact prompt' }), { signal: controller.signal });
+    assert.deepEqual(result, { text: ' exact backup result ' });
+    assert.deepEqual(calls.uploadedPaths, [filepath]);
+    assert.equal(calls.generations.length, 1);
+    assert.equal(backupCalls.length, 1);
+    assert.deepEqual(backupCalls[0]?.request, {
+      filepath,
+      prompt: 'exact prompt',
+      mediaKind: 'image'
+    });
+    assert.equal('model' in (backupCalls[0]?.request ?? {}), false);
+    assert.equal(backupCalls[0]?.options?.signal, controller.signal);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('enabled backup containment rejects before Gemini upload and backup invocation', async () => {
+  const allowedRoot = await mkdtemp(path.join(tmpdir(), 'gemini-allowed-'));
+  const outsideRoot = await mkdtemp(path.join(tmpdir(), 'gemini-outside-'));
+  try {
+    const outside = path.join(outsideRoot, 'outside.png');
+    await writeFile(outside, 'fixture');
+    const { service, calls } = fakeService();
+    let backupCalls = 0;
+    const failure = await captureFailure(new GeminiRecognitionProvider(
+      service,
+      enabledBackupConfig([allowedRoot]),
+      { backupProvider: { recognize: async () => { backupCalls += 1; return { text: 'no' }; } } }
+    ), request({ filepath: outside }));
+    assert.equal(failure.category, 'invalid-request');
+    assert.equal(calls.uploadedPaths.length, 0);
+    assert.equal(calls.generations.length, 0);
+    assert.equal(backupCalls, 0);
+  } finally {
+    await rm(allowedRoot, { recursive: true, force: true });
+    await rm(outsideRoot, { recursive: true, force: true });
+  }
+});
+
+test('explicit pin and preparation failure never invoke enabled backup', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gemini-backup-blocks-'));
+  try {
+    const filepath = path.join(root, 'fixture.png');
+    await writeFile(filepath, 'fixture');
+    for (const [recognitionRequest, serviceOptions] of [
+      [request({ filepath, model: 'configured-model' }), { generationError: sdkError(503, 'UNAVAILABLE') }],
+      [request({ filepath }), { uploadError: new Error('upload failed') }]
+    ] as const) {
+      const { service } = fakeService(serviceOptions);
+      let backupCalls = 0;
+      await captureFailure(new GeminiRecognitionProvider(
+        service,
+        enabledBackupConfig([root]),
+        {
+          sleep: async () => undefined,
+          backupProvider: { recognize: async () => { backupCalls += 1; return { text: 'no' }; } }
+        }
+      ), recognitionRequest);
+      assert.equal(backupCalls, 0);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('backup unsupported media category remains verbatim in final bounded diagnostic', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gemini-backup-category-'));
+  try {
+    const filepath = path.join(root, 'fixture.png');
+    await writeFile(filepath, 'fixture');
+    const { service } = fakeService({ generationError: sdkError(503, 'UNAVAILABLE') });
+    const failure = await captureFailure(new GeminiRecognitionProvider(
+      service,
+      enabledBackupConfig([root]),
+      {
+        sleep: async () => undefined,
+        backupProvider: {
+          recognize: async () => {
+            throw Object.assign(new Error('fixed'), {
+              name: 'ProviderFailure', provider: 'openai-compatible',
+              category: 'unsupported-media', safeMessage: 'secret should not appear'
+            });
+          }
+        }
+      }
+    ), request({ filepath }));
+    assert.equal(failure.safeMessage, 'Recognition recovery failed.');
+    const terminal = getRecoveryTerminalMessage(failure) ?? '';
+    assert.match(terminal, /reason=backup-exhausted/u);
+    assert.match(terminal, /category=unsupported-media/u);
+    assert.equal(terminal.includes('secret should not appear'), false);
+    assert.equal(Buffer.byteLength(terminal, 'utf8') <= 4096, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('synthetic raw status properties and malformed envelopes are never trusted', async () => {
   const throwingStatus = Object.create(null) as Record<string, unknown>;
   Object.defineProperty(throwingStatus, 'status', { get: () => { throw new Error('getter secret'); } });
   for (const cause of [
-    { status: '429' }, { status: Number.NaN }, { status: Infinity },
-    { status: -Infinity }, { status: 404 }, throwingStatus
+    { status: 429 }, Object.create({ status: 429 }), { status: '429' },
+    { status: Number.NaN }, { status: Infinity }, throwingStatus
   ]) {
     const { service } = fakeService({ generationError: cause });
     const failure = await captureFailure(new GeminiRecognitionProvider(service, config()), request());
@@ -266,7 +623,7 @@ test('synthetic invalid and unmapped statuses remain unknown without status', as
   }
 });
 
-test('message, name, tokens, retryability, and upstream code never alter classification', async () => {
+test('preparation message, name, tokens, retryability, and upstream code never alter classification', async () => {
   const variants = [
     new Error('got status: 429 rate limit token exhausted'),
     Object.assign(new Error('server unavailable'), {
@@ -303,10 +660,8 @@ test('owned timeout identity alone maps to GEMINI_VIDEO_PROCESSING_TIMEOUT', asy
 });
 
 test('retained cause is non-enumerable and public failure text is sanitized', async () => {
-  const cause = Object.assign(new Error('upstream content secret'), {
-    status: 429,
-    code: 'UPSTREAM_CODE_SECRET'
-  });
+  const cause = sdkError(403, 'PERMISSION_DENIED');
+  Object.assign(cause, { upstreamCode: 'UPSTREAM_CODE_SECRET' });
   const filepath = 'C:/private/media/secret.png';
   const prompt = 'private prompt secret';
   const model = 'private model secret';
@@ -319,7 +674,7 @@ test('retained cause is non-enumerable and public failure text is sanitized', as
   assert.equal(failure.cause, cause);
   assert.equal(Object.getOwnPropertyDescriptor(failure, 'cause')?.enumerable, false);
   const publicText = `${failure.safeMessage}${JSON.stringify(failure)}${JSON.stringify({ ...failure })}`;
-  for (const secret of [filepath, prompt, model, cause.message, cause.code]) {
+  for (const secret of [filepath, prompt, model, cause.message, 'UPSTREAM_CODE_SECRET']) {
     assert.equal(publicText.includes(secret), false);
   }
   assert.equal(failure.safeMessage.includes('429'), false);
@@ -334,15 +689,35 @@ test('valid Gemini config composes directly through the pinned constructor', asy
   assert.deepEqual(await provider.recognize(request()), { text: 'composed result' });
 });
 
-test('adapter source contains no forbidden future-sprint behavior or wrapper call', async () => {
-  const source = await readFile(
+test('source boundaries isolate raw SDK extraction and deterministic recovery behavior', async () => {
+  const adapterSource = await readFile(
     path.resolve(process.cwd(), 'src/services/gemini-recognition-provider.ts'),
     'utf8'
   );
-  assert.match(source, /\.processFileOrThrow\(/u);
-  assert.doesNotMatch(source, /\.processFile\(/u);
-  assert.doesNotMatch(source, /\bfetch\s*\(|OpenAI|allowedMediaRoots|realpath|readFile/u);
-  assert.doesNotMatch(source, /retry|fallback|cooldown|routing|parallel|throttl/iu);
-  assert.doesNotMatch(source, /\.message|\.name|\.code|retryable|tokens|ApiError|ClientError|ServerError/u);
-  assert.doesNotMatch(source, /setTimeout|AbortController|AbortSignal\.any/u);
+  const classifierSource = await readFile(
+    path.resolve(process.cwd(), 'src/services/gemini-error-classifier.ts'),
+    'utf8'
+  );
+  const routerSource = await readFile(
+    path.resolve(process.cwd(), 'src/services/gemini-recovery-router.ts'),
+    'utf8'
+  );
+  assert.match(adapterSource, /\.processFileOrThrow\(/u);
+  assert.doesNotMatch(adapterSource, /\.processFile\(/u);
+  assert.doesNotMatch(adapterSource, /\bfetch\s*\(|realpath|readFile/u);
+  assert.match(adapterSource, /canonicalizeContainedFile/u);
+  assert.match(adapterSource, /backupProvider/u);
+  assert.doesNotMatch(adapterSource, /\.message|\.name|\.code|ClientError|ServerError|got status:/u);
+  assert.match(classifierSource, /\.message/u);
+  assert.match(classifierSource, /\.name/u);
+  assert.match(classifierSource, /ClientError|ServerError/u);
+  assert.match(classifierSource, /got status:/u);
+  assert.doesNotMatch(routerSource, /\.(?:message|name|code)\b|ClientError|ServerError|got status:/u);
+  for (const source of [adapterSource, classifierSource, routerSource]) {
+    assert.doesNotMatch(source, /\brandom\s*[:=(]|jitter\s*[:=(]|Math\.random|operator.?log|AbortSignal\.any/iu);
+  }
+  assert.match(routerSource, /backup-exhausted/u);
+  assert.match(routerSource, /baseBackoffMs/u);
+  assert.match(routerSource, /recordTransientFailure/u);
+  assert.doesNotMatch(routerSource, /setTimeout|AbortController|Promise\.race/u);
 });
